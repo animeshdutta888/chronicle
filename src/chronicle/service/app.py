@@ -89,24 +89,23 @@ def create_app() -> Any:
     <title>Chronicle</title>
     <style>
       :root {
-        --bg: #07111c;
-        --bg-soft: #0d1827;
-        --surface: rgba(10, 19, 31, 0.88);
-        --surface-strong: rgba(13, 24, 39, 0.96);
-        --surface-muted: rgba(17, 31, 49, 0.88);
-        --ink: #f6fbff;
-        --muted: #8fa0b7;
-        --line: rgba(173, 194, 222, 0.12);
-        --line-strong: rgba(173, 194, 222, 0.22);
-        --accent: #6ee7c8;
-        --accent-deep: #2dc5a0;
-        --accent-soft: rgba(110, 231, 200, 0.1);
-        --accent-glow: rgba(110, 231, 200, 0.24);
-        --success: #73e2a7;
-        --warn: #f0c36c;
-        --danger: #f08f9b;
-        --shadow-lg: 0 28px 70px rgba(2, 7, 14, 0.52);
-        --shadow-sm: 0 16px 34px rgba(2, 7, 14, 0.34);
+        --bg: #0b1020;
+        --surface: rgba(13, 19, 35, 0.84);
+        --surface-strong: rgba(17, 24, 43, 0.94);
+        --surface-muted: rgba(19, 28, 48, 0.76);
+        --ink: #f8fbff;
+        --muted: #9eabc2;
+        --line: rgba(162, 178, 204, 0.14);
+        --line-strong: rgba(162, 178, 204, 0.24);
+        --accent: #6fa8ff;
+        --accent-deep: #8dc8ff;
+        --accent-soft: rgba(111, 168, 255, 0.12);
+        --accent-glow: rgba(111, 168, 255, 0.22);
+        --success: #8de0b4;
+        --warn: #f1c573;
+        --danger: #f29aa2;
+        --shadow-lg: 0 28px 60px rgba(2, 6, 18, 0.45);
+        --shadow-sm: 0 12px 30px rgba(2, 6, 18, 0.28);
         --radius-xl: 24px;
         --radius-lg: 18px;
         --radius-md: 14px;
@@ -121,11 +120,11 @@ def create_app() -> Any:
         margin: 0;
         color: var(--ink);
         background:
-          radial-gradient(circle at top left, rgba(110, 231, 200, 0.14), transparent 26%),
-          radial-gradient(circle at 82% 0%, rgba(69, 130, 255, 0.14), transparent 28%),
-          linear-gradient(180deg, rgba(255,255,255,0.03), transparent 24%),
+          radial-gradient(circle at top left, rgba(111, 168, 255, 0.14), transparent 24%),
+          radial-gradient(circle at 82% 0%, rgba(141, 200, 255, 0.12), transparent 24%),
+          linear-gradient(180deg, rgba(255,255,255,0.02), transparent 22%),
           var(--bg);
-        font-family: "Inter Tight", "Avenir Next", "Segoe UI", sans-serif;
+        font-family: "IBM Plex Sans", "Inter Tight", "Avenir Next", sans-serif;
       }
       body::before {
         content: "";
@@ -139,21 +138,16 @@ def create_app() -> Any:
         mask-image: linear-gradient(180deg, rgba(0,0,0,0.55), transparent 75%);
       }
       main {
-        max-width: 1280px;
+        max-width: 1240px;
         margin: 0 auto;
-        padding: 18px;
+        padding: 18px 18px 28px;
         position: relative;
       }
       .app-shell { display: grid; gap: var(--space-4); align-items: start; }
-      .top-shell {
-        display: grid;
-        grid-template-columns: minmax(0, 1.1fr) minmax(360px, 0.9fr);
-        gap: var(--space-4);
-        align-items: start;
-      }
+      .top-shell { display: grid; gap: var(--space-4); }
       .panel {
         background: var(--surface);
-        backdrop-filter: blur(10px);
+        backdrop-filter: blur(16px);
         border: 1px solid var(--line);
         border-radius: var(--radius-xl);
         box-shadow: var(--shadow-lg);
@@ -168,24 +162,27 @@ def create_app() -> Any:
         background: linear-gradient(90deg, transparent, var(--accent-glow), transparent);
       }
       .panel-inner {
-        padding: var(--space-4);
+        padding: 38px 42px;
         position: relative;
         z-index: 1;
       }
-      .hero-stack {
+
+      .hero-copy-stack {
         display: grid;
-        gap: var(--space-4);
+        gap: 22px;
+        align-content: center;
       }
+      .hero-stack { display: grid; gap: var(--space-3); }
       .brand-badge {
         display: inline-flex;
         align-items: center;
-        gap: 10px;
-        padding: 8px 12px;
+        gap: 8px;
+        padding: 7px 11px;
         border-radius: 999px;
-        background: rgba(110, 231, 200, 0.08);
+        background: var(--accent-soft);
         color: var(--accent-deep);
-        border: 1px solid rgba(110, 231, 200, 0.16);
-        font-size: 12px;
+        border: 1px solid rgba(111, 168, 255, 0.16);
+        font-size: 11px;
         letter-spacing: 0.04em;
         text-transform: uppercase;
         font-weight: 700;
@@ -195,21 +192,37 @@ def create_app() -> Any:
         width: 28px;
         height: 28px;
         border-radius: 10px;
-        background: linear-gradient(135deg, var(--accent) 0%, var(--accent-deep) 100%);
-        color: #07111c;
+        background: linear-gradient(135deg, var(--accent) 0%, #d7eeff 100%);
+        color: #091120;
         display: grid;
         place-items: center;
         font-size: 12px;
         box-shadow: var(--shadow-sm);
       }
+      .hero-panel {
+        min-height: 100%;
+      }
+      .hero-layout {
+        display: grid;
+        grid-template-columns: minmax(0, 0.95fr) minmax(420px, 1.05fr);
+        gap: 44px;
+        align-items: center;
+      }
+      .hero-copy-stack {
+        display: grid;
+        gap: 16px;
+        align-content: start;
+      }
       h1 {
-        font-family: "Söhne Breit", "Space Grotesk", "Inter Tight", sans-serif;
-        font-size: clamp(34px, 4vw, 50px);
-        line-height: 0.96;
+        font-family: "Space Grotesk", "IBM Plex Sans", sans-serif;
+        font-size: clamp(48px, 5vw, 78px);
+        font-weight: 800;
+        line-height: 1.03;
+        letter-spacing: -0.055em;
         margin: 0;
-        letter-spacing: -0.05em;
+        max-width: 13.5ch;
+        color: #f5f7ff;
         text-wrap: balance;
-        max-width: 15ch;
       }
       h2 {
         margin: 0;
@@ -228,36 +241,162 @@ def create_app() -> Any:
       }
       strong { color: var(--ink); }
       .hero-copy {
-        font-size: 16px;
-        max-width: 58ch;
+        font-size: 15px;
+        max-width: 44ch;
       }
-      .summary-grid {
-        display: grid;
-        grid-template-columns: repeat(3, minmax(0, 1fr));
-        gap: var(--space-3);
+      .hero-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        align-items: center;
       }
-      .summary-tile {
-        background: var(--surface-muted);
+      .hero-link {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .hero-link.secondary {
+        background: rgba(255, 255, 255, 0.04);
         border: 1px solid var(--line);
-        border-radius: var(--radius-lg);
-        padding: var(--space-3);
-        min-width: 0;
-        transition: border-color 160ms ease, transform 160ms ease;
-      }
-      .summary-tile:hover {
-        border-color: var(--line-strong);
-        transform: translateY(-1px);
-      }
-      .summary-tile b {
-        display: block;
-        font-size: 16px;
-        margin-bottom: 4px;
         color: var(--ink);
       }
-      .summary-tile span {
-        color: var(--muted);
+      .chip-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+      .impact-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+
+        padding: 10px 16px;
+
+        border-radius: 999px;
+
+        background:
+          linear-gradient(
+            180deg,
+            rgba(255,255,255,0.045),
+            rgba(255,255,255,0.02)
+          );
+        border: 1px solid rgba(255,255,255,0.08);
+        color: #dbe7ff;
+        font-size: 12px;
+        font-weight: 600;
+        letter-spacing: -0.01em;
+        backdrop-filter: blur(12px);
+        box-shadow:
+          inset 0 1px 0 rgba(255,255,255,0.05);
+      }
+      .hero-visual {
+        position: relative;
+        padding: 16px;
+        border-radius: 24px;
+        border: 1px solid rgba(111, 168, 255, 0.18);
+        background:
+          radial-gradient(circle at top, rgba(111, 168, 255, 0.12), transparent 34%),
+          linear-gradient(180deg, rgba(255,255,255,0.05), rgba(255,255,255,0.02)),
+          rgba(11, 18, 34, 0.92);
+        overflow: hidden;
+      }
+      .hero-visual::before {
+        content: "";
+        position: absolute;
+        inset: 10px;
+        border-radius: 16px;
+        border: 1px solid rgba(173, 194, 222, 0.08);
+        pointer-events: none;
+      }
+      .flow-stack {
+        position: relative;
+        display: grid;
+        gap: 8px;
+        z-index: 1;
+      }
+      .flow-node {
+        display: grid;
+        grid-template-columns: 30px minmax(0, 1fr);
+        align-items: center;
+        gap: 12px;
+        padding: 11px 13px;
+        border-radius: 16px;
+        background: rgba(255, 255, 255, 0.035);
+        border: 1px solid rgba(173, 194, 222, 0.11);
+        box-shadow: inset 0 1px 0 rgba(255,255,255,0.03);
+      }
+      .flow-node strong {
+        font-size: 13px;
+        letter-spacing: -0.01em;
+      }
+      .flow-mark {
+        width: 30px;
+        height: 30px;
+        border-radius: 10px;
+        display: grid;
+        place-items: center;
+        font-size: 11px;
+        font-weight: 800;
+        color: #0a1222;
+        background: linear-gradient(135deg, rgba(141, 200, 255, 0.98), rgba(111, 168, 255, 0.84));
+        box-shadow: 0 0 0 5px rgba(111, 168, 255, 0.08);
+      }
+      .flow-arrow {
+        width: 2px;
+        height: 18px;
+        margin-left: 14px;
+        background: linear-gradient(180deg, rgba(111, 168, 255, 0.65), rgba(111, 168, 255, 0.08));
+        position: relative;
+      }
+      .flow-arrow::after {
+        content: "";
+        position: absolute;
+        left: -4px;
+        bottom: -1px;
+        border-left: 5px solid transparent;
+        border-right: 5px solid transparent;
+        border-top: 7px solid rgba(111, 168, 255, 0.62);
+      }
+      .metric-strip {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+
+        gap: 12px;
+
+        margin-top: 18px;
+
+        position: relative;
+        z-index: 1;
+      }
+
+      .metric-tile {
+        padding: 18px;
+        border-radius: 18px;
+        background:
+          linear-gradient(
+            180deg,
+            rgba(255,255,255,0.045),
+            rgba(255,255,255,0.02)
+          );
+        border: 1px solid rgba(255,255,255,0.08);
+        backdrop-filter: blur(14px);
+        box-shadow:
+          inset 0 1px 0 rgba(255,255,255,0.04);
+      }
+
+      .metric-tile b {
+        display: block;
+        font-size: 28px;
+        font-weight: 700;
+        margin-bottom: 8px;
+        letter-spacing: -0.04em;
+        color: #f5f7ff;
+      }
+      .metric-tile span {
+        display: block;
         font-size: 13px;
         line-height: 1.5;
+        color: rgba(219,231,255,0.72);
       }
       .section-stack {
         display: grid;
@@ -267,84 +406,95 @@ def create_app() -> Any:
         display: grid;
         gap: var(--space-4);
       }
-      .button-row {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: var(--space-3);
-      }
-      .button, button {
-        appearance: none;
-        border: 0;
-        border-radius: var(--radius-md);
-        padding: 11px 15px;
-        font-size: 14px;
-        cursor: pointer;
-        text-decoration: none;
-        transition: transform 160ms ease, box-shadow 160ms ease, background 160ms ease, border-color 160ms ease;
-      }
-      .button:hover, button:hover {
-        transform: translateY(-1px);
-      }
-      .button.primary, button {
-        background: linear-gradient(135deg, var(--accent) 0%, var(--accent-deep) 100%);
-        color: #07111c;
-        font-weight: 700;
-        box-shadow: 0 14px 28px rgba(45, 197, 160, 0.2);
-      }
-      .button.secondary {
-        background: rgba(255, 255, 255, 0.7);
-        border: 1px solid var(--line);
-        color: var(--ink);
-      }
+      .button,
+button {
+  appearance: none;
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 16px;
+
+  padding: 14px 22px;
+
+  font-size: 15px;
+  font-weight: 600;
+
+  cursor: pointer;
+  text-decoration: none;
+
+  transition:
+    transform 180ms ease,
+    background 180ms ease,
+    border-color 180ms ease,
+    box-shadow 180ms ease;
+}
+
+.button.primary,
+button {
+  background: linear-gradient(
+    135deg,
+    #4f8cff 0%,
+    #76a9ff 100%
+  );
+
+  color: #08111f;
+
+  box-shadow:
+    0 8px 30px rgba(79, 140, 255, 0.28),
+    inset 0 1px 0 rgba(255,255,255,0.28);
+}
+
+.button.primary:hover,
+button:hover {
+  transform: translateY(-2px);
+  box-shadow:
+    0 12px 36px rgba(79, 140, 255, 0.34),
+    inset 0 1px 0 rgba(255,255,255,0.28);
+}
+
+.button.secondary {
+  background: rgba(255,255,255,0.03);
+
+  color: #eef4ff;
+
+  border: 1px solid rgba(255,255,255,0.08);
+
+  backdrop-filter: blur(12px);
+}
+
+.button.secondary:hover {
+  background: rgba(255,255,255,0.05);
+  transform: translateY(-2px);
+}
       .meta-grid {
         display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
         gap: var(--space-3);
       }
-      .info-card {
-        background: var(--surface-strong);
-        border: 1px solid var(--line);
-        border-radius: var(--radius-lg);
-        padding: var(--space-3);
-      }
-      .meta-list {
+      .meta-card {
         display: grid;
-        gap: 0;
+        gap: 10px;
       }
-      .meta-row {
-        display: flex;
+      .meta-kicker {
+        display: inline-flex;
         align-items: center;
-        justify-content: space-between;
-        gap: var(--space-3);
-        padding: 10px 0;
-        border-top: 1px solid var(--line);
-        min-width: 0;
-      }
-      .meta-row:first-child {
-        border-top: 0;
-        padding-top: 0;
-      }
-      .meta-row:last-child {
-        padding-bottom: 0;
-      }
-      .meta-copy b {
-        display: block;
-        font-size: 14px;
-        margin-bottom: 2px;
-      }
-      .meta-copy span {
-        display: block;
+        gap: 8px;
+        width: fit-content;
+        padding: 5px 9px;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid var(--line);
         color: var(--muted);
-        font-size: 13px;
-        line-height: 1.45;
-        overflow-wrap: anywhere;
+        font-size: 10px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        font-weight: 700;
       }
-      .meta-value {
-        color: var(--ink);
-        font-weight: 600;
+      .meta-card h2 {
+        font-size: 17px;
+        letter-spacing: -0.02em;
+      }
+      .meta-card p {
         font-size: 13px;
-        white-space: nowrap;
-        flex-shrink: 0;
+        line-height: 1.5;
       }
       .workspace-grid {
         display: grid;
@@ -382,8 +532,8 @@ def create_app() -> Any:
         color: rgba(143, 160, 183, 0.82);
       }
       input:focus, select:focus, textarea:focus {
-        border-color: rgba(110, 231, 200, 0.45);
-        box-shadow: 0 0 0 4px rgba(110, 231, 200, 0.08);
+        border-color: rgba(111, 168, 255, 0.45);
+        box-shadow: 0 0 0 4px rgba(111, 168, 255, 0.08);
       }
       textarea {
         min-height: 82px;
@@ -643,9 +793,9 @@ def create_app() -> Any:
         font-weight: 700;
         margin-right: 6px;
         margin-bottom: 6px;
-        background: rgba(110, 231, 200, 0.08);
+        background: rgba(111, 168, 255, 0.08);
         color: var(--ink);
-        border: 1px solid rgba(110, 231, 200, 0.16);
+        border: 1px solid rgba(111, 168, 255, 0.16);
         max-width: 100%;
         overflow-wrap: anywhere;
       }
@@ -671,12 +821,8 @@ def create_app() -> Any:
         font-size: 13px;
         font-weight: 600;
       }
-      .eyebrow {
-        font-size: 11px;
-        text-transform: uppercase;
-        letter-spacing: 0.12em;
-        color: var(--accent);
-        font-weight: 700;
+      html {
+        scroll-behavior: smooth;
       }
       details > pre {
         margin-top: 10px;
@@ -687,7 +833,9 @@ def create_app() -> Any:
       }
       @media (max-width: 900px) {
         .top-shell,
-        .summary-grid,
+        .hero-layout,
+        .metric-strip,
+        .meta-grid,
         .workspace-grid,
         .field-grid,
         .result-overview,
@@ -697,12 +845,14 @@ def create_app() -> Any:
           align-items: flex-start;
           flex-direction: column;
         }
-        .meta-row,
         .result-header {
           align-items: flex-start;
           flex-direction: column;
         }
         h1 { font-size: 36px; max-width: none; }
+        .hero-actions {
+          align-items: stretch;
+        }
       }
     </style>
   </head>
@@ -711,92 +861,103 @@ def create_app() -> Any:
       <div class="app-shell">
         <div class="top-shell">
           <section class="hero-stack">
-            <div class="panel">
-              <div class="panel-inner section-stack">
-              <div class="brand-badge">
-                <span class="brand-mark">Ch</span>
-                <span>Chronicle</span>
-              </div>
-              <span class="eyebrow">Context orchestration for coding workflows</span>
-              <h1>Sharper context. Lower spend. Grounded output.</h1>
-              <p class="hero-copy">Map the code that matters, compress it into a usable context pack, and decide whether an LLM call is worth the tokens before you ship.</p>
-              <div class="summary-grid">
-                <div class="summary-tile"><b>Python-first</b><span>Built for structured <code>.py</code> repos right now</span></div>
-                <div class="summary-tile"><b>Grounded</b><span>Symbols, flow, provenance, and patch-aware hints</span></div>
-                <div class="summary-tile"><b>Measured</b><span>Routing, budget checks, and token-savings evaluation</span></div>
-              </div>
-              <p class="subtle">Best for agent workflows, patch planning, architecture questions, and token-efficiency reviews on Python repos.</p>
+            <div class="panel hero-panel">
+              <div class="panel-inner hero-layout">
+                <div class="hero-copy-stack">
+                  <div class="brand-badge">
+                    <span class="brand-mark">Ch</span>
+                    <span>Chronicle</span>
+                  </div>
+                  <h1><span>AI</span> Context Orchestration for Coding Agents</h1>
+                  <p class="hero-copy">Reduce token spend. Improve grounded code generation. Reuse codebase memory across workflows.</p>
+                  <div class="hero-actions">
+                    <a class="button primary hero-link" href="#workspace">Get Started</a>
+                    <a class="button secondary hero-link" href="#architecture">View Architecture</a>
+                  </div>
+                  <div class="chip-row">
+                    <span class="impact-chip">Lower AI Cost</span>
+                    <span class="impact-chip">Grounded Outputs</span>
+                    <span class="impact-chip">Reusable Context Memory</span>
+                  </div>
+                </div>
+                <div class="hero-visual" id="architecture">
+                  <div class="flow-stack">
+                    <div class="flow-node">
+                      <span class="flow-mark">01</span>
+                      <strong>Codebase</strong>
+                    </div>
+                    <div class="flow-arrow"></div>
+                    <div class="flow-node">
+                      <span class="flow-mark">02</span>
+                      <strong>Memory Graph</strong>
+                    </div>
+                    <div class="flow-arrow"></div>
+                    <div class="flow-node">
+                      <span class="flow-mark">03</span>
+                      <strong>Context Compression</strong>
+                    </div>
+                    <div class="flow-arrow"></div>
+                    <div class="flow-node">
+                      <span class="flow-mark">04</span>
+                      <strong>AI Agent / LLM</strong>
+                    </div>
+                    <div class="flow-arrow"></div>
+                    <div class="flow-node">
+                      <span class="flow-mark">05</span>
+                      <strong>Reliable Code Changes</strong>
+                    </div>
+                  </div>
+                  <div class="metric-strip">
+                    <div class="metric-tile">
+                      <b>60-90%</b>
+                      <span>smaller payloads</span>
+                    </div>
+                    <div class="metric-tile">
+                      <b>Faster</b>
+                      <span>multi-file reasoning</span>
+                    </div>
+                    <div class="metric-tile">
+                      <b>Reduced</b>
+                      <span>hallucinated edits</span>
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
           </section>
-
-          <aside class="meta-grid">
-            <div class="panel" id="result-model">
-              <div class="panel-inner">
-                <h2>Result model</h2>
-                <div class="info-card" style="margin-top:14px;">
-                  <div class="meta-list">
-                    <div class="meta-row">
-                      <div class="meta-copy">
-                        <b>Signal</b>
-                        <span>What code area matches the question and how confident that match is.</span>
-                      </div>
-                      <div class="meta-value">Fast read</div>
-                    </div>
-                    <div class="meta-row">
-                      <div class="meta-copy">
-                        <b>Route</b>
-                        <span>Whether the current match is strong enough for an LLM call.</span>
-                      </div>
-                      <div class="meta-value">Decision</div>
-                    </div>
-                    <div class="meta-row">
-                      <div class="meta-copy">
-                        <b>Payload</b>
-                        <span>What context would be sent, trimmed to the smallest useful slice.</span>
-                      </div>
-                      <div class="meta-value">Compression</div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div class="panel">
-              <div class="panel-inner">
-                <div class="meta-list">
-                  <div class="meta-row">
-                    <div class="meta-copy">
-                      <b>Doctor</b>
-                      <span>Check support, retrieval strength, and likely code areas.</span>
-                    </div>
-                    <div class="meta-value">Repo fit</div>
-                  </div>
-                  <div class="meta-row">
-                    <div class="meta-copy">
-                      <b>Demo</b>
-                      <span>Summarize route, context plan, and token impact.</span>
-                    </div>
-                    <div class="meta-value">Decision</div>
-                  </div>
-                  <div class="meta-row">
-                    <div class="meta-copy">
-                      <b>Context / Call chain / Evaluate</b>
-                      <span>Inspect grounded context, flow, and estimated savings.</span>
-                    </div>
-                    <div class="meta-value">Core</div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </aside>
         </div>
 
-        <section class="panel" style="margin-top: var(--space-4);">
+        <section class="meta-grid">
+          <div class="panel">
+            <div class="panel-inner meta-card">
+              <span class="meta-kicker">Support</span>
+              <h2>Python-first today</h2>
+              <p>Structured <code>.py</code> repositories have the strongest retrieval, grounding, and context compression support right now.</p>
+            </div>
+          </div>
+
+          <div class="panel" id="result-model">
+            <div class="panel-inner meta-card">
+              <span class="meta-kicker">Integrations</span>
+              <h2>SDK, CLI, and MCP</h2>
+              <p>Use Chronicle through the hosted workspace now, with the same context layer ready for SDK and MCP-driven agent workflows.</p>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-inner meta-card">
+              <span class="meta-kicker">Result model</span>
+              <h2>Signal, route, payload</h2>
+              <p>Every run explains what matched, whether an LLM call is justified, and the smallest grounded payload to send.</p>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel" id="workspace" style="margin-top: var(--space-4);">
           <div class="panel-inner workspace-shell" id="try">
             <div class="section-stack">
               <h2>Workspace</h2>
-              <p>Paste a repository URL, choose a view, and inspect the route before sending anything expensive to a model.</p>
+              <p>Paste a repository URL and inspect the route before sending anything expensive to a model.</p>
             </div>
             <div class="field-grid">
               <div>
@@ -808,14 +969,6 @@ def create_app() -> Any:
                 <input id="token_budget" type="number" value="2500" />
               </div>
               <div>
-                <label for="action">View</label>
-                <select id="action">
-                  <option value="demo">Demo</option>
-                  <option value="doctor">Doctor</option>
-                  <option value="context">Context</option>
-                  <option value="evaluate">Evaluate</option>
-                  <option value="call-chain">Call chain</option>
-                </select>
               </div>
             </div>
             <div class="input-stack">
@@ -1143,7 +1296,7 @@ def create_app() -> Any:
           const repoUrl = document.getElementById("repo_url").value.trim();
           const tokenBudget = Number(document.getElementById("token_budget").value || "2500");
           const query = document.getElementById("query").value.trim();
-          const action = document.getElementById("action").value;
+          const action = "demo";
           const apiKey = document.getElementById("api_key").value.trim();
           resultBox.innerHTML = renderLoadingState(action);
           try {
