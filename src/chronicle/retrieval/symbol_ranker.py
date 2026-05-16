@@ -27,11 +27,23 @@ class SymbolRanker:
                 ],
             )
         )
+        normalized_haystack = self._normalized_terms(
+            symbol.name,
+            symbol.file_path,
+            symbol.signature or "",
+            symbol.docstring or "",
+            symbol.body,
+            " ".join(symbol.imports),
+        )
         score = 0.0
         exact_name = symbol.name.split(".")[-1].lower()
         normalized_leaf = self._normalize_identifier(symbol.name.split(".")[-1])
         normalized_candidates = {self._normalize_identifier(candidate) for candidate in plan.candidate_symbols}
-        normalized_keywords = {self._normalize_identifier(keyword) for keyword in plan.keywords}
+        normalized_keywords = {
+            variant
+            for keyword in plan.keywords
+            for variant in self._keyword_variants(keyword)
+        }
         if exact_name and exact_name in plan.keywords:
             score += 5.0
         if normalized_leaf and normalized_leaf in normalized_candidates:
@@ -43,6 +55,7 @@ class SymbolRanker:
         if symbol.file_path in plan.candidate_files:
             score += 4.0
         score += sum(0.6 for keyword in plan.keywords if keyword in haystack)
+        score += sum(0.7 for keyword in normalized_keywords if keyword and keyword in normalized_haystack)
         if normalized_leaf and normalized_leaf in self._normalize_identifier(symbol.file_path):
             score += 1.0
         if symbol.type == "class" and any(candidate[:1].isupper() for candidate in plan.candidate_symbols):
@@ -83,3 +96,26 @@ class SymbolRanker:
         if parts:
             return "".join(part.lower() for part in parts)
         return re.sub(r"[^a-z0-9]+", "", text.lower())
+
+    def _keyword_variants(self, text: str) -> set[str]:
+        normalized = self._normalize_identifier(text)
+        if not normalized:
+            return set()
+        variants = {normalized}
+        if normalized.endswith("ies") and len(normalized) > 4:
+            variants.add(normalized[:-3] + "y")
+        if normalized.endswith("es") and len(normalized) > 4:
+            variants.add(normalized[:-2])
+        if normalized.endswith("s") and len(normalized) > 3:
+            variants.add(normalized[:-1])
+        return {variant for variant in variants if variant}
+
+    def _normalized_terms(self, *values: str) -> set[str]:
+        terms: set[str] = set()
+        for value in values:
+            for token in re.findall(r"[A-Za-z_][A-Za-z0-9_./-]*", value):
+                normalized = self._normalize_identifier(token)
+                if normalized:
+                    terms.add(normalized)
+                    terms.update(self._keyword_variants(normalized))
+        return terms

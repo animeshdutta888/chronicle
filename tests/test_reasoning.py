@@ -12,7 +12,10 @@ from chronicle import cli as chronicle_cli
 from chronicle.integrations import ChronicleMCPServer
 from chronicle.integrations.langgraph_node import ChronicleContextNode
 from chronicle.llm.guardrails import Guardrails
+from chronicle.llm.router import LLMRouter
+from chronicle.retrieval.query_planner import DeterministicQueryPlanner
 from chronicle.service.app import create_app
+from chronicle.core.models import ValidationResult
 
 
 @dataclass
@@ -29,6 +32,14 @@ class RepairingProvider:
         if "Repaired answer:" in prompt:
             return "Use `app.py` and `RequestContext.push()` only. `RequestContext` is defined in `app.py`."
         return "Modify `missing.py` and call `missing_symbol()` from there."
+
+
+@dataclass
+class GroundingSkewProvider:
+    def generate_text(self, model: str, prompt: str) -> str | None:
+        if "File: app.py" in prompt:
+            return "RequestContext is defined in app.py as the RequestContext class."
+        return "RequestContext is defined in missing.py and handled by missing_symbol()."
 
 
 class ReasoningTests(unittest.TestCase):
@@ -189,6 +200,62 @@ class ReasoningTests(unittest.TestCase):
             self.assertGreater(demo["evaluation"]["baseline_tokens"], 0)
             self.assertGreater(demo["evaluation"]["chronicle_tokens"], 0)
 
+    def test_prepare_prompt_packet_returns_sdk_ready_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "app.py").write_text(
+                "class RequestContext:\n"
+                "    def push(self):\n"
+                "        return True\n\n"
+                "def build_request_context(app, environ):\n"
+                "    context = RequestContext()\n"
+                "    return context\n",
+                encoding="utf-8",
+            )
+
+            chronicle = Chronicle(repo_path=root)
+            packet = chronicle.prepare_prompt_packet(
+                "Explain how RequestContext is used.",
+                token_budget=500,
+            )
+
+            self.assertEqual(packet.query, "Explain how RequestContext is used.")
+            self.assertTrue(packet.selected_symbols)
+            self.assertTrue(packet.compressed_context)
+            self.assertIn("output_format", packet.response_policy)
+
+    def test_context_compression_preserves_richer_anchor_coverage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "async_pipeline.py").write_text(
+                "async def load_batch(source):\n"
+                "    payload = await source.fetch()\n"
+                "    return payload\n\n"
+                "def chunk_batch(items):\n"
+                "    chunks = [items[i:i+10] for i in range(0, len(items), 10)]\n"
+                "    return chunks\n\n"
+                "async def async_pipeline(source):\n"
+                "    data = await load_batch(source)\n"
+                "    chunks = chunk_batch(data)\n"
+                "    return await fetch_preprocess_train_chunks(chunks)\n\n"
+                "async def fetch_preprocess_train_chunks(chunks):\n"
+                "    results = []\n"
+                "    for chunk in chunks:\n"
+                "        results.append(chunk)\n"
+                "    return results\n",
+                encoding="utf-8",
+            )
+
+            chronicle = Chronicle(repo_path=root)
+            context = chronicle.context(
+                "How to reduce latency in async_pipeline and fetch_preprocess_train_chunks?",
+                token_budget=700,
+                remember=False,
+            )
+
+            self.assertIn("data = await load_batch(source)", context.compressed_context)
+            self.assertIn("results.append(chunk)", context.compressed_context)
+
     def test_demo_adds_domain_aware_summary_for_image_repo(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -217,6 +284,124 @@ class ReasoningTests(unittest.TestCase):
             self.assertIn("labelsquare", demo["repo_insight"])
             self.assertIn("detection stage", demo["llm_readiness"]["query_strategy"].lower())
             self.assertIn("call-chain", demo["llm_readiness"]["recommended_next_step"])
+
+    def test_demo_uses_performance_guidance_for_latency_query(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "async_pipeline.py").write_text(
+                "async def fetch_preprocess_train_chunks(source):\n"
+                "    data = await source.fetch()\n"
+                "    chunks = [data[i:i+10] for i in range(0, len(data), 10)]\n"
+                "    return chunks\n\n"
+                "async def async_pipeline(source):\n"
+                "    chunks = await fetch_preprocess_train_chunks(source)\n"
+                "    return chunks\n",
+                encoding="utf-8",
+            )
+
+            chronicle = Chronicle(repo_path=root)
+            demo = chronicle.demo("How to improve latency of asynchronous pipelines?", token_budget=500)
+
+            self.assertIn("performance-oriented pipeline", demo["repo_insight"])
+            self.assertIn("latency stage", demo["llm_readiness"]["query_strategy"].lower())
+            self.assertNotIn("classification", demo["llm_readiness"]["query_strategy"].lower())
+            self.assertNotIn("classification", demo["llm_readiness"]["recommended_next_step"].lower())
+
+    def test_query_planner_classifies_locator_and_performance_intents(self) -> None:
+        planner = DeterministicQueryPlanner()
+
+        self.assertEqual(planner.plan("Where is RequestContext defined?").intent, "locator")
+        self.assertEqual(planner.plan("How to improve latency of asynchronous pipelines?").intent, "performance")
+
+    def test_router_uses_evidence_aware_policy_for_locator_and_performance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "ctx.py").write_text(
+                "class RequestContext:\n"
+                "    def push(self):\n"
+                "        return True\n",
+                encoding="utf-8",
+            )
+            (root / "async_pipeline.py").write_text(
+                "async def load_batch(source):\n"
+                "    return await source.fetch()\n\n"
+                "def chunk_batch(items):\n"
+                "    return [items[i:i+10] for i in range(0, len(items), 10)]\n\n"
+                "async def async_pipeline(source):\n"
+                "    return await fetch_preprocess_train_chunks(source)\n\n"
+                "async def fetch_preprocess_train_chunks(source):\n"
+                "    data = await load_batch(source)\n"
+                "    return chunk_batch(data)\n",
+                encoding="utf-8",
+            )
+
+            chronicle = Chronicle(repo_path=root)
+            planner = DeterministicQueryPlanner()
+            router = LLMRouter()
+
+            locator_query = "Where is RequestContext defined?"
+            locator_context = chronicle.context(locator_query, token_budget=700, remember=False)
+            locator_decision = router.route(plan=planner.plan(locator_query), context=locator_context)
+
+            performance_query = "How to reduce latency in async_pipeline and fetch_preprocess_train_chunks?"
+            performance_context = chronicle.context(performance_query, token_budget=1200, remember=False)
+            performance_decision = router.route(plan=planner.plan(performance_query), context=performance_context)
+
+            self.assertFalse(locator_decision.call_llm)
+            self.assertTrue(performance_decision.call_llm)
+
+    def test_context_selection_covers_multiple_query_concepts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "agents").mkdir()
+            (root / "runtime").mkdir()
+            (root / "app").mkdir()
+            (root / "app" / "tools").mkdir()
+            (root / "agents" / "manager.py").write_text(
+                "class ManagerAgent:\n"
+                "    async def run(self, state):\n"
+                "        memory = await self._memory.recall(state)\n"
+                "        return memory\n",
+                encoding="utf-8",
+            )
+            (root / "agents" / "memory.py").write_text(
+                "class MemoryAgent:\n"
+                "    async def recall(self, state):\n"
+                "        return []\n",
+                encoding="utf-8",
+            )
+            (root / "app" / "tools" / "reminders.py").write_text(
+                "def add_reminder(path, body, due=None):\n"
+                "    return {'body': body, 'due': due}\n\n"
+                "def list_reminders(path):\n"
+                "    return []\n",
+                encoding="utf-8",
+            )
+            (root / "runtime" / "service.py").write_text(
+                "from agents.manager import ManagerAgent\n"
+                "from agents.memory import MemoryAgent\n"
+                "from app.tools.reminders import add_reminder, list_reminders\n\n"
+                "class NudgeRuntime:\n"
+                "    def __init__(self):\n"
+                "        self._memory = MemoryAgent()\n"
+                "        self._manager = ManagerAgent()\n\n"
+                "    async def remind(self, body):\n"
+                "        return add_reminder('reminders.json', body)\n",
+                encoding="utf-8",
+            )
+
+            chronicle = Chronicle(repo_path=root)
+            context = chronicle.context(
+                "How does ManagerAgent orchestrate reminders and memory?",
+                token_budget=900,
+                remember=False,
+            )
+
+            names = {symbol.name for symbol in context.selected_symbols}
+            self.assertIn("ManagerAgent", names)
+            self.assertIn("NudgeRuntime", names)
+            self.assertTrue({"MemoryAgent", "add_reminder", "list_reminders"} & names)
+            self.assertIn("add_reminder", context.compressed_context)
 
     def test_request_context_query_prefers_exact_class_symbol(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -297,6 +482,38 @@ class ReasoningTests(unittest.TestCase):
             self.assertTrue(report["baseline"]["repaired"])
             self.assertGreaterEqual(report["chronicle"]["validation"]["confidence"], 0.5)
             self.assertTrue(report["chronicle"]["repair_notes"])
+
+    def test_ab_winner_summary_flags_quality_regression(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "app.py").write_text(
+                "class RequestContext:\n"
+                "    def push(self):\n"
+                "        return True\n",
+                encoding="utf-8",
+            )
+
+            chronicle = Chronicle(repo_path=root)
+            baseline = chronicle.validate_output(
+                "RequestContext is defined in app.py as the RequestContext class.",
+                chronicle.context("Where is RequestContext defined?", token_budget=400, remember=False),
+            )
+            chronicle_result = ValidationResult(
+                valid=False,
+                issues=baseline.issues,
+                grounded=False,
+                confidence=0.2,
+                grounded_references=baseline.grounded_references,
+                ungrounded_references=baseline.ungrounded_references,
+            )
+
+            summary = chronicle._ab_winner_summary(
+                baseline_validation=baseline,
+                chronicle_validation=chronicle_result,
+                reduction_percent=75.0,
+            )
+
+            self.assertIn("Baseline answer appears more grounded", summary)
 
     def test_guardrails_redact_secrets_before_external_send(self) -> None:
         guardrails = Guardrails()

@@ -26,9 +26,13 @@ class ChronicleConfig:
     default_token_budgets: dict[str, int] = field(
         default_factory=lambda: {
             "search": 1500,
+            "locator": 1500,
             "explain": 3000,
             "debug": 5000,
             "edit": 7000,
+            "refactor": 6500,
+            "performance": 4500,
+            "dataflow": 4500,
             "architecture": 9000,
         }
     )

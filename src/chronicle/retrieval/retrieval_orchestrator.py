@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+import re
 
 from ..core.config import ChronicleConfig
 from ..core.models import (
@@ -68,6 +69,12 @@ class RetrievalOrchestrator:
             ranking_scores[symbol.id] = score
             reasons[symbol.id] = reason
         ranked.sort(key=lambda item: item[1], reverse=True)
+        ranked = self._diversify_ranked_symbols(
+            ranked=ranked,
+            plan=plan,
+            exact_seed_ids=exact_seed_ids,
+            limit=self.config.max_symbols,
+        )
 
         compressed_context, selected_symbols, excluded_symbols, estimated_tokens = self.compressor.compress(
             ranked_symbols=ranked[: self.config.max_symbols],
@@ -193,6 +200,155 @@ class RetrievalOrchestrator:
                 counts[path] += 1
         return counts
 
+    def _diversify_ranked_symbols(
+        self,
+        *,
+        ranked: list[tuple[Symbol, float, str]],
+        plan: QueryPlan,
+        exact_seed_ids: set[str],
+        limit: int,
+    ) -> list[tuple[Symbol, float, str]]:
+        if len(ranked) <= 2 or limit <= 1:
+            return ranked
+        concepts = self._query_concepts(plan)
+        if not concepts:
+            return ranked
+
+        pool = ranked[: max(limit * 4, 16)]
+        selected: list[tuple[Symbol, float, str]] = []
+        selected_ids: set[str] = set()
+        covered_concepts: set[str] = set()
+        covered_files: set[str] = set()
+        top_score = pool[0][1] if pool else 0.0
+        score_floor = max(1.25, round(top_score * 0.3, 3))
+
+        def choose(entry: tuple[Symbol, float, str]) -> None:
+            symbol = entry[0]
+            selected.append(entry)
+            selected_ids.add(symbol.id)
+            covered_files.add(symbol.file_path)
+            covered_concepts.update(self._symbol_concepts(symbol, concepts))
+
+        for entry in pool:
+            if entry[0].id in exact_seed_ids and entry[1] >= score_floor:
+                choose(entry)
+        if pool and pool[0][0].id not in selected_ids:
+            choose(pool[0])
+
+        while len(selected) < min(limit, len(pool)):
+            best_entry: tuple[Symbol, float, str] | None = None
+            best_score = float("-inf")
+            for entry in pool:
+                symbol, base_score, _ = entry
+                if symbol.id in selected_ids:
+                    continue
+                concept_hits = self._symbol_concepts(symbol, concepts)
+                if base_score < score_floor and not concept_hits.difference(covered_concepts):
+                    continue
+                novelty_bonus = 1.15 * len(concept_hits.difference(covered_concepts))
+                if symbol.file_path not in covered_files:
+                    novelty_bonus += 0.25
+                adjusted_score = base_score + novelty_bonus + self._intent_flow_preference(plan, symbol, concept_hits)
+                if adjusted_score > best_score:
+                    best_entry = entry
+                    best_score = adjusted_score
+            if best_entry is None:
+                break
+            choose(best_entry)
+
+        for entry in ranked:
+            if entry[0].id not in selected_ids:
+                selected.append(entry)
+        return selected
+
+    def _query_concepts(self, plan: QueryPlan) -> set[str]:
+        generic_terms = {
+            "code",
+            "repo",
+            "project",
+            "file",
+            "files",
+            "class",
+            "function",
+            "method",
+            "module",
+            "python",
+            "query",
+            "question",
+            "explain",
+            "handled",
+            "improve",
+            "using",
+            "through",
+            "about",
+        }
+        concepts: set[str] = set()
+        for candidate in plan.candidate_symbols:
+            normalized = self._normalize_concept(candidate.split(".")[-1])
+            if normalized:
+                concepts.add(normalized)
+        for keyword in plan.keywords:
+            normalized = self._normalize_concept(keyword)
+            if normalized and normalized not in generic_terms:
+                concepts.add(normalized)
+        return concepts
+
+    def _symbol_concepts(self, symbol: Symbol, concepts: set[str]) -> set[str]:
+        if not concepts:
+            return set()
+        haystack = self._normalized_symbol_terms(symbol)
+        return {concept for concept in concepts if concept in haystack}
+
+    def _normalized_symbol_terms(self, symbol: Symbol) -> set[str]:
+        values = [
+            symbol.name,
+            symbol.file_path,
+            symbol.signature or "",
+            symbol.docstring or "",
+            symbol.body,
+            " ".join(symbol.calls),
+            " ".join(symbol.imports),
+        ]
+        terms: set[str] = set()
+        for value in values:
+            for token in re.findall(r"[A-Za-z_][A-Za-z0-9_./-]*", value):
+                normalized = self._normalize_concept(token)
+                if normalized:
+                    terms.add(normalized)
+        return terms
+
+    def _normalize_concept(self, text: str) -> str:
+        pieces = re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?=[A-Z]|$)|\d+", text.replace(".", "_"))
+        if pieces:
+            normalized = "".join(piece.lower() for piece in pieces)
+        else:
+            normalized = re.sub(r"[^a-z0-9]+", "", text.lower())
+        if normalized.endswith("ies") and len(normalized) > 4:
+            return normalized[:-3] + "y"
+        if normalized.endswith("es") and len(normalized) > 4:
+            return normalized[:-2]
+        if normalized.endswith("s") and len(normalized) > 3:
+            return normalized[:-1]
+        return normalized
+
+    def _intent_flow_preference(self, plan: QueryPlan, symbol: Symbol, concept_hits: set[str]) -> float:
+        if plan.intent not in {"dataflow", "architecture", "performance", "debug", "edit", "refactor"}:
+            return 0.0
+        bonus = 0.0
+        body = symbol.body or ""
+        has_methods = "def " in body or "async def " in body
+        if symbol.type in {"function", "method"}:
+            bonus += 1.4
+        if symbol.calls:
+            bonus += 0.35
+        if symbol.imports:
+            bonus += 0.35
+        if concept_hits and symbol.type == "class" and not has_methods and not symbol.calls and not symbol.imports:
+            bonus -= 1.5
+        if concept_hits and ("/models/" in symbol.file_path or "/schemas/" in symbol.file_path):
+            bonus -= 0.6
+        return bonus
+
     def _select_commits(
         self,
         plan: QueryPlan,
@@ -279,7 +435,7 @@ class RetrievalOrchestrator:
         patch_hints: PatchContextHints | None,
         call_chain,
     ) -> LLMContextBrief | None:
-        if plan.intent == "search" and not patch_hints and call_chain is None:
+        if plan.intent in {"search", "locator"} and not patch_hints and call_chain is None:
             return None
         focus: list[str] = []
         focus.extend(symbol.name for symbol in selected_symbols[:4])
@@ -291,14 +447,20 @@ class RetrievalOrchestrator:
         focus = list(dict.fromkeys(item for item in focus if item))
         objective = {
             "edit": "Plan or explain a grounded code enhancement using edited surfaces and their dependencies.",
+            "refactor": "Plan a grounded refactor using the retrieved symbols, dependencies, and likely impact boundaries.",
             "debug": "Analyze the likely failure path using the retrieved symbols, changed code, and surrounding flow.",
             "architecture": "Explain the functional flow and cross-symbol orchestration without inventing missing behavior.",
+            "performance": "Analyze likely latency or throughput boundaries using only grounded execution surfaces.",
+            "dataflow": "Explain how data or control moves through the retrieved code path without inventing missing steps.",
             "explain": "Summarize the grounded code path and responsibilities clearly and concisely.",
         }.get(plan.intent, "Use the grounded context only and avoid unsupported claims.")
         recommended_output = {
             "edit": "Return an enhancement plan or patch-oriented explanation with impacted files, callers/callees, and tests.",
+            "refactor": "Return a grounded refactor plan with impacted callers, callees, interfaces, and validation checks.",
             "debug": "Return a grounded diagnosis with probable causes, touched code, and validation checks.",
             "architecture": "Return a flow-oriented explanation with boundaries, call chain, and dependency touchpoints.",
+            "performance": "Return likely bottlenecks, affected stages, and low-risk optimization directions tied to exact symbols.",
+            "dataflow": "Return a stepwise grounded flow with exact symbols, boundaries, and handoff points.",
             "explain": "Return a concise explanation tied to exact files and symbols.",
         }.get(plan.intent, "Return a grounded answer with exact file paths and symbols.")
         return LLMContextBrief(
@@ -362,8 +524,12 @@ class RetrievalOrchestrator:
             lines.append("- Check runtime behavior and failure path details before suggesting a fix.")
         if plan.needs_git_history:
             lines.append("- Include recent change history only if it materially explains the behavior.")
-        if plan.intent == "edit":
+        if plan.intent in {"edit", "refactor"}:
             lines.append("- Call out impacted callers, callees, tests, and persistence boundaries.")
+        elif plan.intent == "performance":
+            lines.append("- Separate orchestration, I/O, batching, and compute hotspots before suggesting optimizations.")
+        elif plan.intent == "dataflow":
+            lines.append("- Preserve the sequence of handoffs and do not skip intermediate boundaries.")
         elif plan.intent == "debug":
             lines.append("- Prefer the shortest grounded failure path and avoid speculative root causes.")
         elif plan.intent == "architecture":
@@ -374,7 +540,7 @@ class RetrievalOrchestrator:
         if not selected_symbols:
             return False
         lowered = query.lower()
-        if plan.intent in {"edit", "architecture", "debug"}:
+        if plan.intent in {"edit", "refactor", "architecture", "debug", "performance", "dataflow"}:
             return True
         trigger_phrases = ("call chain", "trace", "flow", "path", "reach", "through", "orchestrate")
         return any(phrase in lowered for phrase in trigger_phrases)

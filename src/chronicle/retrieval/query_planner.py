@@ -41,15 +41,68 @@ class DeterministicQueryPlanner:
         )
 
     def _intent(self, lowered: str) -> str:
+        if self._is_locator_query(lowered):
+            return "locator"
+        if self._is_performance_query(lowered):
+            return "performance"
+        if self._is_dataflow_query(lowered):
+            return "dataflow"
         if any(token in lowered for token in ("why", "explain", "how does", "what does")):
             return "explain"
         if any(token in lowered for token in ("bug", "error", "failing", "failure", "debug", "fix")):
             return "debug"
-        if any(token in lowered for token in ("edit", "change", "update", "modify", "patch", "enhance", "improve", "refactor", "implement")):
+        if "refactor" in lowered:
+            return "refactor"
+        if any(token in lowered for token in ("edit", "change", "update", "modify", "patch", "enhance", "improve", "implement")):
             return "edit"
         if any(token in lowered for token in ("architecture", "design", "flow", "system")):
             return "architecture"
         return "search"
+
+    def _is_locator_query(self, lowered: str) -> bool:
+        locator_phrases = (
+            "where is",
+            "which file",
+            "where does",
+            "where can i find",
+            "defined",
+            "definition",
+        )
+        return any(phrase in lowered for phrase in locator_phrases)
+
+    def _is_performance_query(self, lowered: str) -> bool:
+        performance_terms = (
+            "latency",
+            "slow",
+            "faster",
+            "speed",
+            "performance",
+            "throughput",
+            "optimiz",
+            "bottleneck",
+            "async",
+            "asynchronous",
+            "concurrency",
+            "parallel",
+            "queue",
+            "batch",
+        )
+        return any(term in lowered for term in performance_terms)
+
+    def _is_dataflow_query(self, lowered: str) -> bool:
+        dataflow_terms = (
+            "flow",
+            "path",
+            "call chain",
+            "trace",
+            "orchestr",
+            "how does",
+            "through",
+            "from",
+            "into",
+            "pipeline",
+        )
+        return any(term in lowered for term in dataflow_terms)
 
     def _keywords(self, lowered: str) -> list[str]:
         stopwords = {

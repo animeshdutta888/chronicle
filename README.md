@@ -39,6 +39,22 @@ It indexes repository structure, ranks the smallest useful context for a coding 
 
 Chronicle should not be treated as benchmark-grade on non-Python repos until symbol extraction, dependency understanding, patch-aware retrieval, and grounding are implemented and validated for that language.
 
+## Python SDK
+
+Chronicle is ready to ship as a private Python package. You do not need to open source your code to use it as an SDK before your LLM calls.
+
+### Install from a private repo
+
+```bash
+pip install "git+ssh://git@github.com/animeshdutta888/chronicle.git"
+```
+
+Or pin a branch or tag:
+
+```bash
+pip install "git+ssh://git@github.com/animeshdutta888/chronicle.git@main"
+```
+
 ## Quick start
 
 ```bash
@@ -178,6 +194,48 @@ context = chronicle.context(
 )
 
 print(context.to_markdown())
+```
+
+SDK packet for your own LLM call:
+
+```python
+from chronicle import Chronicle
+
+chronicle = Chronicle(repo_path="./repo")
+packet = chronicle.prepare_prompt_packet(
+    query="How should I refactor the retry path?",
+    token_budget=3000,
+)
+
+if packet.should_call_llm and packet.prompt:
+    prompt = packet.prompt
+else:
+    prompt = packet.compressed_context
+```
+
+The SDK packet gives you:
+
+- `compressed_context` for the smallest grounded repo slice
+- `response_policy` for output length and format control
+- `should_call_llm` to block weak model calls
+- `prompt` when Chronicle recommends a model call
+- `selected_symbols` and `selected_files` for tracing and logging
+
+Run the local SDK example against the Nudge repo with Ollama:
+
+```bash
+PYTHONPATH=src python3 examples/sample_nudge_sdk_ollama.py \
+  --repo /Users/animeshdutta/Projects/Nudge_git/Nudge \
+  --model qwen2.5:14b-instruct
+```
+
+Run the same example in comparison mode to print baseline vs Chronicle token usage and both model responses:
+
+```bash
+PYTHONPATH=src python3 examples/sample_nudge_sdk_ollama.py \
+  --repo /Users/animeshdutta/Projects/Nudge_git/Nudge \
+  --model qwen2.5:14b-instruct \
+  --compare
 ```
 
 LangGraph-style integration:

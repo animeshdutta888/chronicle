@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "chronicle"
 version = "0.1.0"
-description = "AI Context Operating System for Coding Agents."
+description = "Python SDK for grounded context compression and LLM routing in coding workflows."
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [

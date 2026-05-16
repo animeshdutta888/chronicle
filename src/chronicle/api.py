@@ -13,6 +13,7 @@ from .core.models import (
     ContextPack,
     EvaluationReport,
     IndexSnapshot,
+    SDKPromptPacket,
     MultiAgentContextBus,
     QueryPlan,
     SessionMemory,
@@ -348,9 +349,9 @@ class Chronicle:
             "llm_readiness": {
                 "send_to_llm": bool(context.llm_decision.call_llm) if context.llm_decision else False,
                 "reason": self._demo_llm_reason(context=context),
-                "query_strategy": self._demo_query_strategy(context=context),
+                "query_strategy": self._demo_query_strategy(query=query, context=context),
                 "context_strategy": self._demo_context_strategy(context=context),
-                "recommended_next_step": self._demo_next_step(context=context),
+                "recommended_next_step": self._demo_next_step(query=query, context=context),
                 "model_class": context.llm_decision.model_class if context.llm_decision else "local",
                 "max_input_tokens": context.llm_decision.max_input_tokens if context.llm_decision else context.estimated_tokens,
                 "max_output_tokens": context.llm_decision.max_output_tokens if context.llm_decision else 0,
@@ -379,6 +380,38 @@ class Chronicle:
                 ),
             },
         }
+
+    def prepare_prompt_packet(
+        self,
+        query: str,
+        token_budget: int | None = None,
+        session_id: str | None = None,
+        *,
+        include_prompt: bool = True,
+    ) -> SDKPromptPacket:
+        self.index()
+        context = self.context(query=query, token_budget=token_budget, session_id=session_id)
+        response_policy = self._response_policy(query=query, context=context)
+        prompt = None
+        if include_prompt and context.llm_decision and context.llm_decision.call_llm:
+            prompt = build_answer_prompt(
+                query=self._llm_query_envelope(query=query, context=context, response_policy=response_policy),
+                context=context.compressed_context,
+            )
+        report = self.evaluate(query=query, token_budget=token_budget, session_id=session_id)
+        return SDKPromptPacket(
+            query=query,
+            repo_path=str(self.config.repo_path),
+            should_call_llm=bool(context.llm_decision.call_llm) if context.llm_decision else False,
+            human_summary=self._demo_human_summary(query=query, context=context, report=report),
+            compressed_context=context.compressed_context,
+            estimated_input_tokens=context.estimated_tokens,
+            response_policy=response_policy,
+            prompt=prompt,
+            selected_symbols=[symbol.name for symbol in context.selected_symbols[:8]],
+            selected_files=list(dict.fromkeys(symbol.file_path for symbol in context.selected_symbols[:8])),
+            llm_decision_reason=context.llm_decision.reason if context.llm_decision else None,
+        )
 
     def baseline_context(self, query: str, token_budget: int | None = None) -> ContextPack:
         snapshot = self._ensure_snapshot()
@@ -666,7 +699,14 @@ class Chronicle:
         guardrails = self.guardrails.inspect(context.compressed_context)
         answer = provider.generate_text(
             model,
-            build_answer_prompt(query=query, context=guardrails.redacted_text),
+            build_answer_prompt(
+                query=self._llm_query_envelope(
+                    query=query,
+                    context=context,
+                    response_policy=self._response_policy(query=query, context=context),
+                ),
+                context=guardrails.redacted_text,
+            ),
         )
         if answer is None:
             raise RuntimeError(
@@ -678,7 +718,11 @@ class Chronicle:
             repaired_answer = provider.generate_text(
                 model,
                 build_repair_prompt(
-                    query=query,
+                    query=self._llm_query_envelope(
+                        query=query,
+                        context=context,
+                        response_policy=self._response_policy(query=query, context=context),
+                    ),
                     context=guardrails.redacted_text,
                     draft_answer=answer,
                     issues=validation.issues,
@@ -746,6 +790,15 @@ class Chronicle:
         chronicle_validation: ValidationResult,
         reduction_percent: float,
     ) -> str:
+        if baseline_validation.grounded and not chronicle_validation.grounded:
+            return (
+                f"Baseline answer appears more grounded. Chronicle still reduced input tokens by {reduction_percent:.2f}%, "
+                "but this run should not be treated as a quality win."
+            )
+        if chronicle_validation.grounded and not baseline_validation.grounded:
+            return (
+                f"Chronicle reduced input tokens by {reduction_percent:.2f}% and produced the more grounded answer."
+            )
         if chronicle_validation.confidence > baseline_validation.confidence and reduction_percent > 0:
             return (
                 f"Chronicle reduced input tokens by {reduction_percent:.2f}% and improved grounding confidence."
@@ -788,7 +841,7 @@ class Chronicle:
         elif top_score < 7.0:
             confidence -= 0.08
 
-        if plan.intent in {"explain", "architecture", "edit"} and len(context.selected_symbols) < 2:
+        if plan.intent in {"explain", "architecture", "edit", "refactor", "performance", "dataflow"} and len(context.selected_symbols) < 2:
             confidence -= 0.1
         if context.excluded_symbols and context.estimated_tokens >= int(context.token_budget * 0.9):
             confidence -= 0.05
@@ -804,6 +857,9 @@ class Chronicle:
         image_summary = self._image_repo_summary(query=query, context=context)
         if image_summary:
             return image_summary
+        performance_summary = self._performance_repo_summary(query=query, context=context)
+        if performance_summary:
+            return performance_summary
         selected = ", ".join(symbol.name for symbol in context.selected_symbols[:4]) or "no strong symbols"
         return f"Chronicle mapped this question to {selected}."
 
@@ -848,7 +904,7 @@ class Chronicle:
             context_preview += "\n\n...[truncated]"
         if context.llm_decision and context.llm_decision.call_llm:
             prompt_preview = build_answer_prompt(
-                query=f"{query}\n\nResponse policy:\n{self._response_policy_text(response_policy)}",
+                query=self._llm_query_envelope(query=query, context=context, response_policy=response_policy),
                 context=context_preview,
             )
             if len(prompt_preview) > 900:
@@ -894,6 +950,9 @@ class Chronicle:
             "render_shape": "short blocks",
         }
 
+    def _llm_query_envelope(self, *, query: str, context: ContextPack, response_policy: dict[str, Any]) -> str:
+        return "\n".join([query.strip(), "", "Response policy:", self._response_policy_text(response_policy)])
+
     def _response_policy_text(self, policy: dict[str, Any]) -> str:
         return "\n".join(
             [
@@ -917,12 +976,15 @@ class Chronicle:
             return "Chronicle found only a narrow slice of the code, so an LLM would likely add little value."
         return "Chronicle thinks deterministic repo signals are enough for now."
 
-    def _demo_query_strategy(self, *, context: ContextPack) -> str:
+    def _demo_query_strategy(self, *, query: str, context: ContextPack) -> str:
         if context.llm_decision and context.llm_decision.call_llm:
             return "Send the user's original question together with Chronicle's grounded context."
-        image_strategy = self._image_query_strategy(context=context)
+        image_strategy = self._image_query_strategy(query=query, context=context)
         if image_strategy:
             return image_strategy
+        performance_strategy = self._performance_query_strategy(query=query, context=context)
+        if performance_strategy:
+            return performance_strategy
         return "Refine the question toward a specific function, stage, or failure point before using an LLM."
 
     def _demo_context_strategy(self, *, context: ContextPack) -> str:
@@ -930,12 +992,15 @@ class Chronicle:
             return "Send only Chronicle's compressed context pack, not the full repository."
         return "Use the selected symbols as exploration hints and avoid sending the current context to a model yet."
 
-    def _demo_next_step(self, *, context: ContextPack) -> str:
+    def _demo_next_step(self, *, query: str, context: ContextPack) -> str:
         if context.llm_decision and context.llm_decision.call_llm:
             return "Proceed with an LLM using the context preview below."
-        image_follow_up = self._image_follow_up(context=context)
+        image_follow_up = self._image_follow_up(query=query, context=context)
         if image_follow_up:
             return image_follow_up
+        performance_follow_up = self._performance_follow_up(query=query, context=context)
+        if performance_follow_up:
+            return performance_follow_up
         top = context.selected_symbols[0].name if context.selected_symbols else "the top symbol"
         return f"Ask a narrower follow-up around {top} or run call-chain to clarify the exact code path first."
 
@@ -947,7 +1012,9 @@ class Chronicle:
             return f"Anchor the model on {names[0]} and preserve the call path from {context.call_chain.entry_symbol}."
         return f"Anchor the model on {self._format_symbol_names(names, limit=min(3, len(names)))} before generalizing."
 
-    def _image_query_strategy(self, *, context: ContextPack) -> str | None:
+    def _image_query_strategy(self, *, query: str, context: ContextPack) -> str | None:
+        if not self._looks_like_image_query(query):
+            return None
         stages = self._image_pipeline_stages(self._image_summary_symbols(context))
         detection = self._format_symbol_names(stages["detection"], limit=2)
         board_labeling = self._format_symbol_names(stages["board_labeling"], limit=2)
@@ -960,7 +1027,9 @@ class Chronicle:
             return f"Refine the question toward classification or labeling around {classification} before using an LLM."
         return None
 
-    def _image_follow_up(self, *, context: ContextPack) -> str | None:
+    def _image_follow_up(self, *, query: str, context: ContextPack) -> str | None:
+        if not self._looks_like_image_query(query):
+            return None
         stages = self._image_pipeline_stages(self._image_summary_symbols(context))
         detection = self._format_symbol_names(stages["detection"], limit=1)
         board_labeling = self._format_symbol_names(stages["board_labeling"], limit=1)
@@ -997,6 +1066,110 @@ class Chronicle:
             "camera",
         )
         return any(term in text for term in image_terms)
+
+    def _looks_like_image_query(self, query: str) -> bool:
+        lowered = query.lower()
+        image_terms = (
+            "image",
+            "vision",
+            "detect",
+            "classification",
+            "classify",
+            "segmentation",
+            "square",
+            "piece",
+            "board",
+            "frame",
+            "opencv",
+            "cv2",
+        )
+        return any(term in lowered for term in image_terms)
+
+    def _performance_repo_summary(self, *, query: str, context: ContextPack) -> str | None:
+        if not self._looks_like_performance_query(query):
+            return None
+        stages = self._pipeline_stages(context)
+        prioritized = [
+            ("orchestration", "the main orchestration path appears to live in"),
+            ("io", "I/O-heavy work appears to cluster around"),
+            ("batching", "batching or chunked work appears in"),
+            ("compute", "the main compute path appears to live in"),
+        ]
+        details: list[str] = []
+        for stage, prefix in prioritized:
+            names = self._format_symbol_names(stages[stage], limit=2)
+            if names:
+                details.append(f"{prefix} {names}")
+        if not details:
+            return None
+        return f"This looks like a performance-oriented pipeline, and {'; '.join(details)}."
+
+    def _performance_query_strategy(self, *, query: str, context: ContextPack) -> str | None:
+        if not self._looks_like_performance_query(query):
+            return None
+        stages = self._pipeline_stages(context)
+        orchestration = self._format_symbol_names(stages["orchestration"], limit=1)
+        io_bound = self._format_symbol_names(stages["io"], limit=2)
+        batching = self._format_symbol_names(stages["batching"], limit=2)
+        if orchestration and io_bound:
+            return f"Refine the question toward a concrete latency stage, like orchestration in {orchestration} or I/O work in {io_bound}."
+        if batching:
+            return f"Refine the question toward chunking, batching, or queue boundaries around {batching} before using an LLM."
+        if orchestration:
+            return f"Refine the question toward the main execution path around {orchestration} before using an LLM."
+        return "Refine the question toward scheduling, batching, I/O, or compute hotspots before using an LLM."
+
+    def _performance_follow_up(self, *, query: str, context: ContextPack) -> str | None:
+        if not self._looks_like_performance_query(query):
+            return None
+        stages = self._pipeline_stages(context)
+        orchestration = self._format_symbol_names(stages["orchestration"], limit=1)
+        io_bound = self._format_symbol_names(stages["io"], limit=1)
+        batching = self._format_symbol_names(stages["batching"], limit=1)
+        if orchestration and io_bound:
+            return f"Run call-chain on {orchestration} first, then ask whether {io_bound} is the main latency boundary."
+        if batching:
+            return f"Ask a narrower follow-up around {batching} to validate chunking, batching, or queue overhead."
+        if orchestration:
+            return f"Ask a narrower follow-up around {orchestration} or run call-chain to isolate the main latency path."
+        return None
+
+    def _looks_like_performance_query(self, query: str) -> bool:
+        lowered = query.lower()
+        performance_terms = (
+            "latency",
+            "slow",
+            "faster",
+            "speed",
+            "performance",
+            "throughput",
+            "optimiz",
+            "bottleneck",
+            "async",
+            "asynchronous",
+            "concurrency",
+            "parallel",
+            "pipeline",
+            "queue",
+            "batch",
+        )
+        return any(term in lowered for term in performance_terms)
+
+    def _pipeline_stages(self, context: ContextPack) -> dict[str, list[str]]:
+        stage_keywords = {
+            "orchestration": ("pipeline", "orchestr", "async", "await", "schedule", "dispatch", "worker"),
+            "io": ("fetch", "load", "read", "write", "download", "upload", "request", "stream", "io"),
+            "batching": ("batch", "chunk", "queue", "buffer", "window"),
+            "compute": ("train", "process", "compute", "transform", "encode", "decode"),
+        }
+        stages = {stage: [] for stage in stage_keywords}
+        symbols = context.selected_symbols[:6] if context.selected_symbols else self._ensure_snapshot().symbols[:20]
+        for symbol in symbols:
+            text = f"{symbol.name} {symbol.file_path} {symbol.body[:240]}".lower()
+            for stage, keywords in stage_keywords.items():
+                if any(keyword in text for keyword in keywords):
+                    stages[stage].append(symbol.name)
+        return {stage: self._unique_preserve_order(names) for stage, names in stages.items()}
 
     def _image_summary_symbols(self, context: ContextPack) -> list[Any]:
         if context.selected_symbols:

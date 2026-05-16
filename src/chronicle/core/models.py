@@ -6,7 +6,7 @@ from .pydantic_compat import BaseModel, ConfigDict, Field
 
 
 SymbolType = Literal["function", "class", "method"]
-Intent = Literal["search", "explain", "debug", "edit", "architecture"]
+Intent = Literal["search", "locator", "explain", "debug", "edit", "refactor", "architecture", "performance", "dataflow"]
 ChangeType = Literal["logic", "validation", "error_handling", "api_change", "refactor", "unknown"]
 ModelClass = Literal["small", "medium", "large", "local"]
 BenchmarkConfidence = Literal["low", "medium", "high"]
@@ -151,6 +151,20 @@ class LLMContextBrief(ChronicleModel):
     objective: str
     recommended_output: str
     focus_areas: list[str] = Field(default_factory=list)
+
+
+class SDKPromptPacket(ChronicleModel):
+    query: str
+    repo_path: str
+    should_call_llm: bool
+    human_summary: str
+    compressed_context: str
+    estimated_input_tokens: int
+    response_policy: dict[str, str | int]
+    prompt: str | None = None
+    selected_symbols: list[str] = Field(default_factory=list)
+    selected_files: list[str] = Field(default_factory=list)
+    llm_decision_reason: str | None = None
 
 
 class ContextPack(ChronicleModel):
