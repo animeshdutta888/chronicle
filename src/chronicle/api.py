@@ -842,11 +842,15 @@ class Chronicle:
             for symbol in context.selected_symbols[:6]
         ]
         focus_summary = self._payload_focus_summary(context=context)
+        response_policy = self._response_policy(query=query, context=context)
         context_preview = context.compressed_context[:460]
         if len(context.compressed_context) > 460:
             context_preview += "\n\n...[truncated]"
         if context.llm_decision and context.llm_decision.call_llm:
-            prompt_preview = build_answer_prompt(query=query, context=context_preview)
+            prompt_preview = build_answer_prompt(
+                query=f"{query}\n\nResponse policy:\n{self._response_policy_text(response_policy)}",
+                context=context_preview,
+            )
             if len(prompt_preview) > 900:
                 prompt_preview = prompt_preview[:900] + "\n\n...[truncated]"
         else:
@@ -854,10 +858,53 @@ class Chronicle:
         return {
             "query": query,
             "focus_summary": focus_summary,
+            "response_policy": response_policy,
             "selected_symbols": selected,
             "context_preview": context_preview,
             "prompt_preview": prompt_preview,
         }
+
+    def _response_policy(self, *, query: str, context: ContextPack) -> dict[str, Any]:
+        lowered = query.lower()
+        if "where is" in lowered or "which file" in lowered or "defined" in lowered:
+            output_format = "short locator"
+            verbosity = "minimal"
+            section_budget = 2
+        elif any(keyword in lowered for keyword in ("how", "improve", "better", "refactor", "upgrade")):
+            output_format = "compact plan"
+            verbosity = "concise"
+            section_budget = 4
+        else:
+            output_format = "grounded summary"
+            verbosity = "concise"
+            section_budget = 3
+
+        max_output_tokens = 220
+        if context.llm_decision and context.llm_decision.max_output_tokens:
+            max_output_tokens = min(context.llm_decision.max_output_tokens, 220)
+        if not (context.llm_decision and context.llm_decision.call_llm):
+            max_output_tokens = min(max_output_tokens, 160)
+
+        return {
+            "output_format": output_format,
+            "verbosity": verbosity,
+            "max_output_tokens": max_output_tokens,
+            "section_budget": section_budget,
+            "citation_scope": "selected symbols only",
+            "render_shape": "short blocks",
+        }
+
+    def _response_policy_text(self, policy: dict[str, Any]) -> str:
+        return "\n".join(
+            [
+                f"- Output format: {policy['output_format']}",
+                f"- Verbosity: {policy['verbosity']}",
+                f"- Max output tokens: {policy['max_output_tokens']}",
+                f"- Section budget: {policy['section_budget']}",
+                f"- Cite using: {policy['citation_scope']}",
+                f"- Render shape: {policy['render_shape']}",
+            ]
+        )
 
     def _demo_llm_reason(self, *, context: ContextPack) -> str:
         if context.llm_decision is None:

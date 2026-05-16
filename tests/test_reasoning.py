@@ -183,6 +183,8 @@ class ReasoningTests(unittest.TestCase):
             self.assertIn("llm_readiness", demo)
             self.assertIn("payload_preview", demo["llm_readiness"])
             self.assertIn("focus_summary", demo["llm_readiness"]["payload_preview"])
+            self.assertIn("response_policy", demo["llm_readiness"]["payload_preview"])
+            self.assertIn("max_output_tokens", demo["llm_readiness"]["payload_preview"]["response_policy"])
             self.assertIn("recommended_next_step", demo["llm_readiness"])
             self.assertGreater(demo["evaluation"]["baseline_tokens"], 0)
             self.assertGreater(demo["evaluation"]["chronicle_tokens"], 0)

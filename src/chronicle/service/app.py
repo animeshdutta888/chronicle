@@ -941,6 +941,7 @@ def create_app() -> Any:
         function renderDemo(payload) {
           const readiness = payload.llm_readiness || {};
           const preview = readiness.payload_preview || {};
+          const responsePolicy = preview.response_policy || {};
           const evaluation = payload.evaluation || {};
           const symbols = (preview.selected_symbols || []).map(symbol => `${symbol.name} (${symbol.file_path}:${symbol.start_line})`);
           const sendClass = readiness.send_to_llm ? "good" : "warn";
@@ -1010,9 +1011,13 @@ def create_app() -> Any:
                     <strong>Context</strong>
                     <span>${escapeHtml(readiness.context_strategy || "N/A")}</span>
                   </div>
+                  <div class="kv-row">
+                    <strong>Response</strong>
+                    <span>${escapeHtml(responsePolicy.output_format || "grounded summary")}, ${escapeHtml(responsePolicy.verbosity || "concise")}, <= ${escapeHtml(String(responsePolicy.max_output_tokens ?? "?"))} tokens</span>
+                  </div>
                 </div>
                 <details style="margin-top:10px;">
-                  <summary>Context preview</summary>
+                  <summary>Context preview ${rawContext ? `<button type="button" class="inline-link" id="open_raw_payload_link_inline">open full payload</button>` : ""}</summary>
                   <pre>${escapeHtml(rawContext)}</pre>
                 </details>
                 ${preview.prompt_preview ? `<details style="margin-top:10px;"><summary>Prompt preview</summary><pre>${escapeHtml(preview.prompt_preview)}</pre></details>` : ""}
@@ -1165,6 +1170,14 @@ def create_app() -> Any:
               activeRawTitle = "Raw payload";
               const openLink = document.getElementById("open_raw_payload_link");
               if (openLink) openLink.addEventListener("click", openRawPayloadModal);
+              const inlineOpenLink = document.getElementById("open_raw_payload_link_inline");
+              if (inlineOpenLink) {
+                inlineOpenLink.addEventListener("click", event => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  openRawPayloadModal();
+                });
+              }
             } else if (action === "doctor") {
               resultBox.innerHTML = renderDoctor(payload);
               activeRawPayload = payload;
