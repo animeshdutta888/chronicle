@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "chronicle"
+version = "0.1.0"
+description = "AI Context Operating System for Coding Agents."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+  { name = "Animesh Dutta" }
+]
+dependencies = [
+  "GitPython>=3.1.43",
+  "numpy>=1.26",
+  "pydantic>=2.8",
+]
+
+[project.optional-dependencies]
+faiss = ["faiss-cpu>=1.8.0"]
+hosted = ["fastapi>=0.115", "uvicorn>=0.30"]
+treesitter = ["tree-sitter>=0.25.0", "tree-sitter-python>=0.23.0"]
+
+[project.scripts]
+chronicle = "chronicle.cli:main"
+chronicle-api = "chronicle.service.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
