@@ -75,11 +75,18 @@ class RetrievalOrchestrator:
             exact_seed_ids=exact_seed_ids,
             limit=self.config.max_symbols,
         )
+        ranked = self._enrich_ranked_symbols(
+            ranked=ranked,
+            symbols=snapshot.symbols,
+            plan=plan,
+            limit=self.config.max_symbols,
+        )
 
         compressed_context, selected_symbols, excluded_symbols, estimated_tokens = self.compressor.compress(
             ranked_symbols=ranked[: self.config.max_symbols],
             token_budget=budget,
             exact_seed_ids=exact_seed_ids,
+            focus_terms=self._query_concepts(plan) | {keyword.lower() for keyword in plan.keywords[:8]},
         )
         selected_symbol_ids = {symbol.id for symbol in selected_symbols}
         call_chain = None
@@ -157,6 +164,12 @@ class RetrievalOrchestrator:
                 estimated_tokens = self.budget_manager.estimate_tokens(combined)
         if coverage_section:
             combined = coverage_section + ("\n\n" + compressed_context if compressed_context else "")
+            if self.budget_manager.fits(combined, budget):
+                compressed_context = combined
+                estimated_tokens = self.budget_manager.estimate_tokens(combined)
+        boundaries_section = self._behavior_boundaries_section(plan=plan, selected_symbols=selected_symbols)
+        if boundaries_section:
+            combined = boundaries_section + ("\n\n" + compressed_context if compressed_context else "")
             if self.budget_manager.fits(combined, budget):
                 compressed_context = combined
                 estimated_tokens = self.budget_manager.estimate_tokens(combined)
@@ -261,6 +274,161 @@ class RetrievalOrchestrator:
                 selected.append(entry)
         return selected
 
+    def _enrich_ranked_symbols(
+        self,
+        *,
+        ranked: list[tuple[Symbol, float, str]],
+        symbols: list[Symbol],
+        plan: QueryPlan,
+        limit: int,
+    ) -> list[tuple[Symbol, float, str]]:
+        if plan.intent not in {"explain", "dataflow", "architecture", "performance", "debug", "refactor", "edit"}:
+            return ranked
+        score_by_id = {symbol.id: score for symbol, score, _ in ranked}
+        reason_by_id = {symbol.id: reason for symbol, _, reason in ranked}
+        symbol_by_id = {symbol.id: symbol for symbol in symbols}
+        children_by_parent: dict[str, list[Symbol]] = defaultdict(list)
+        symbols_by_file_leaf: dict[tuple[str, str], Symbol] = {}
+        for symbol in symbols:
+            if symbol.parent:
+                children_by_parent[symbol.parent].append(symbol)
+            symbols_by_file_leaf[(symbol.file_path, symbol.name.split(".")[-1])] = symbol
+
+        concepts = self._query_concepts(plan)
+        seed_entries = ranked[: min(limit, 8)]
+        additions: list[tuple[Symbol, float, str]] = []
+        added_ids: set[str] = set()
+        additions_by_seed: dict[str, list[tuple[Symbol, float, str]]] = defaultdict(list)
+        for seed_symbol, _, _ in seed_entries:
+            for method in self._expand_anchor_methods(
+                seed_symbol=seed_symbol,
+                children_by_parent=children_by_parent,
+                score_by_id=score_by_id,
+                concepts=concepts,
+            ):
+                if method.id in added_ids:
+                    continue
+                addition = (
+                    method,
+                    round(score_by_id.get(seed_symbol.id, 0.0) * 0.45 + score_by_id.get(method.id, 0.0) + 2.2, 3),
+                    "expanded from class anchor",
+                )
+                additions.append(addition)
+                additions_by_seed[seed_symbol.id].append(addition)
+                added_ids.add(method.id)
+            for helper in self._expand_referenced_helpers(
+                seed_symbol=seed_symbol,
+                concepts=concepts,
+                symbols_by_file_leaf=symbols_by_file_leaf,
+                symbol_by_id=symbol_by_id,
+            ):
+                if helper.id in added_ids:
+                    continue
+                addition = (
+                    helper,
+                    round(score_by_id.get(helper.id, 0.0) + 2.6, 3),
+                    "referenced helper from selected flow",
+                )
+                additions.append(addition)
+                additions_by_seed[seed_symbol.id].append(addition)
+                added_ids.add(helper.id)
+
+        if not additions:
+            return ranked
+
+        merged: list[tuple[Symbol, float, str]] = []
+        for entry in ranked:
+            merged.append(entry)
+            seed_additions = additions_by_seed.get(entry[0].id, [])
+            if seed_additions:
+                merged.extend(sorted(seed_additions, key=lambda item: item[1], reverse=True))
+
+        deduped: list[tuple[Symbol, float, str]] = []
+        seen_ids: set[str] = set()
+        for entry in merged:
+            if entry[0].id in seen_ids:
+                continue
+            deduped.append(entry)
+            seen_ids.add(entry[0].id)
+        return sorted(
+            deduped,
+            key=lambda item: (
+                item[1],
+                len(item[0].calls),
+                len(item[0].body.splitlines()),
+            ),
+            reverse=True,
+        )
+
+    def _expand_anchor_methods(
+        self,
+        *,
+        seed_symbol: Symbol,
+        children_by_parent: dict[str, list[Symbol]],
+        score_by_id: dict[str, float],
+        concepts: set[str],
+    ) -> list[Symbol]:
+        if seed_symbol.type != "class":
+            return []
+        methods = [child for child in children_by_parent.get(seed_symbol.name, []) if child.type == "method"]
+        methods.sort(
+            key=lambda child: (
+                self._method_priority(child=child, score_by_id=score_by_id, concepts=concepts),
+                len(child.calls),
+                len(child.body.splitlines()),
+            ),
+            reverse=True,
+        )
+        return methods[:2]
+
+    def _expand_referenced_helpers(
+        self,
+        *,
+        seed_symbol: Symbol,
+        concepts: set[str],
+        symbols_by_file_leaf: dict[tuple[str, str], Symbol],
+        symbol_by_id: dict[str, Symbol],
+    ) -> list[Symbol]:
+        helpers: list[Symbol] = []
+        seen_ids: set[str] = set()
+        for reference in list(seed_symbol.calls) + list(seed_symbol.imports):
+            target = self._resolve_reference_symbol(
+                reference=reference,
+                symbols_by_file_leaf=symbols_by_file_leaf,
+                symbol_by_id=symbol_by_id,
+            )
+            if target is None or target.id in seen_ids:
+                continue
+            if concepts and not self._symbol_concepts(target, concepts):
+                continue
+            if seed_symbol.type == "class" and target.type == "class":
+                continue
+            helpers.append(target)
+            seen_ids.add(target.id)
+        return helpers[:3]
+
+    def _resolve_reference_symbol(
+        self,
+        *,
+        reference: str,
+        symbols_by_file_leaf: dict[tuple[str, str], Symbol],
+        symbol_by_id: dict[str, Symbol],
+    ) -> Symbol | None:
+        if reference in symbol_by_id:
+            return symbol_by_id[reference]
+        if ":" in reference:
+            file_path, name = reference.split(":", 1)
+            return symbols_by_file_leaf.get((file_path, name.split(".")[-1]))
+        if "." in reference:
+            parts = reference.split(".")
+            if len(parts) >= 2:
+                leaf = parts[-1]
+                file_path = "/".join(parts[:-1]) + ".py"
+                match = symbols_by_file_leaf.get((file_path, leaf))
+                if match is not None:
+                    return match
+        return None
+
     def _query_concepts(self, plan: QueryPlan) -> set[str]:
         generic_terms = {
             "code",
@@ -276,6 +444,9 @@ class RetrievalOrchestrator:
             "query",
             "question",
             "explain",
+            "how",
+            "orchestrat",
+            "orchestrate",
             "handled",
             "improve",
             "using",
@@ -348,6 +519,21 @@ class RetrievalOrchestrator:
         if concept_hits and ("/models/" in symbol.file_path or "/schemas/" in symbol.file_path):
             bonus -= 0.6
         return bonus
+
+    def _method_priority(self, *, child: Symbol, score_by_id: dict[str, float], concepts: set[str]) -> float:
+        score = score_by_id.get(child.id, 0.0)
+        concept_hits = len(self._symbol_concepts(child, concepts))
+        score += concept_hits * 1.2
+        lowered_name = child.name.split(".")[-1].lower()
+        if lowered_name in {"run", "handle", "execute", "process"} or lowered_name.startswith("_handle"):
+            score += 4.0
+        if lowered_name.startswith("_safe") or lowered_name.startswith("_remaining") or lowered_name.startswith("_budget"):
+            score -= 1.5
+        if lowered_name.startswith("_filter") or lowered_name.startswith("_should_"):
+            score -= 0.8
+        score += min(len(child.calls), 8) * 0.2
+        score += min(len(child.body.splitlines()), 40) * 0.03
+        return round(score, 3)
 
     def _select_commits(
         self,
@@ -438,7 +624,7 @@ class RetrievalOrchestrator:
         if plan.intent in {"search", "locator"} and not patch_hints and call_chain is None:
             return None
         focus: list[str] = []
-        focus.extend(symbol.name for symbol in selected_symbols[:4])
+        focus.extend(self._focus_symbols_for_brief(plan=plan, selected_symbols=selected_symbols))
         if patch_hints:
             focus.extend(patch_hints.changed_symbol_names[:3])
             focus.extend(patch_hints.related_test_files[:2])
@@ -468,6 +654,33 @@ class RetrievalOrchestrator:
             focus_areas=focus,
             recommended_output=recommended_output,
         )
+
+    def _focus_symbols_for_brief(self, *, plan: QueryPlan, selected_symbols: list[Symbol]) -> list[str]:
+        if not selected_symbols:
+            return []
+        concepts = self._query_concepts(plan)
+        ranked_focus = sorted(
+            selected_symbols,
+            key=lambda symbol: (
+                len(self._symbol_concepts(symbol, concepts)),
+                len(self._boundary_helpers(symbol=symbol, concepts=concepts)),
+                len(self._symbol_concepts(symbol, concepts)) >= 2,
+                len(symbol.calls),
+                symbol.type == "function" or symbol.type == "method",
+            ),
+            reverse=True,
+        )
+        focus: list[str] = []
+        seen_groups: set[str] = set()
+        for symbol in ranked_focus:
+            group = symbol.parent or symbol.name
+            if group in seen_groups and self._symbol_concepts(symbol, concepts):
+                continue
+            focus.append(symbol.name)
+            seen_groups.add(group)
+            if len(focus) >= 4:
+                break
+        return focus
 
     def _llm_brief_section(self, brief: LLMContextBrief) -> str:
         lines = [
@@ -544,3 +757,48 @@ class RetrievalOrchestrator:
             return True
         trigger_phrases = ("call chain", "trace", "flow", "path", "reach", "through", "orchestrate")
         return any(phrase in lowered for phrase in trigger_phrases)
+
+    def _behavior_boundaries_section(self, *, plan: QueryPlan, selected_symbols: list[Symbol]) -> str:
+        if plan.intent not in {"explain", "dataflow", "architecture", "performance", "debug", "refactor", "edit"}:
+            return ""
+        concepts = self._query_concepts(plan)
+        if len(concepts) < 2 or not selected_symbols:
+            return ""
+        lines = ["Behavior boundaries:"]
+        added = 0
+        seen_groups: set[str] = set()
+        for symbol in selected_symbols[:8]:
+            hits = self._symbol_concepts(symbol, concepts)
+            if not hits:
+                continue
+            group = symbol.parent or symbol.name
+            if group in seen_groups:
+                continue
+            missing = sorted(concepts.difference(hits))
+            summary = (
+                f"- {symbol.name} ({symbol.file_path}:{symbol.start_line}) matches {', '.join(sorted(hits))}"
+            )
+            if missing and len(missing) <= 2:
+                summary += f"; no direct evidence here for {', '.join(missing)}"
+            helpers = self._boundary_helpers(symbol=symbol, concepts=concepts)
+            if helpers:
+                summary += f"; helper evidence: {', '.join(helpers)}"
+            lines.append(summary)
+            seen_groups.add(group)
+            added += 1
+            if added >= 4:
+                break
+        return "\n".join(lines) if added else ""
+
+    def _boundary_helpers(self, *, symbol: Symbol, concepts: set[str]) -> list[str]:
+        helpers: list[str] = []
+        for reference in symbol.calls:
+            name = reference.split(":")[-1].split(".")[-1]
+            normalized = self._normalize_concept(name)
+            if normalized in concepts and name not in helpers:
+                helpers.append(name)
+            elif any(concept in normalized for concept in concepts) and name not in helpers:
+                helpers.append(name)
+            if len(helpers) >= 3:
+                break
+        return helpers

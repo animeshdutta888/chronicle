@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "chronicle"
+name = "chronicle-sdk"
 version = "0.1.0"
 description = "Python SDK for grounded context compression and LLM routing in coding workflows."
 readme = "README.md"

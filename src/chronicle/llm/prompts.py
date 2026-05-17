@@ -8,6 +8,7 @@ def build_answer_prompt(query: str, context: str) -> str:
         "Rules:\n"
         "- Answer the user's exact question in the first sentence.\n"
         "- Cite exact file paths and symbol names from the context.\n"
+        "- Treat any behavior-boundary notes in the context as constraints on attribution.\n"
         "- Distinguish direct ownership, runtime wiring, and downstream helpers when relevant.\n"
         "- If the context is partial or inconclusive, say that explicitly instead of guessing.\n"
         "- Keep the answer compact and avoid generic code advice.\n\n"

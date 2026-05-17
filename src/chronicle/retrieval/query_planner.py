@@ -110,6 +110,7 @@ class DeterministicQueryPlanner:
             "and",
             "for",
             "with",
+            "how",
             "this",
             "that",
             "where",

@@ -17,6 +17,7 @@ It indexes repository structure, ranks the smallest useful context for a coding 
 - Symbol graph and import dependency graph construction
 - Git evolution summaries for churn, risky changes, and symbol-to-file history
 - Deterministic query planning and context ranking
+- Ownership-aware context shaping that separates direct behavior, runtime wiring, and adjacent helpers
 - Token-budget-aware context compression
 - LLM routing decisions without forcing an LLM call
 - Output validation for grounded file and symbol references
@@ -41,18 +42,12 @@ Chronicle should not be treated as benchmark-grade on non-Python repos until sym
 
 ## Python SDK
 
-Chronicle is ready to ship as a private Python package. You do not need to open source your code to use it as an SDK before your LLM calls.
+Chronicle is ready to ship as a public Python package while still working against private codebases in your own environment before LLM calls.
 
-### Install from a private repo
-
-```bash
-pip install "git+ssh://git@github.com/animeshdutta888/chronicle.git"
-```
-
-Or pin a branch or tag:
+### Install from PyPI
 
 ```bash
-pip install "git+ssh://git@github.com/animeshdutta888/chronicle.git@main"
+pip install chronicle-sdk
 ```
 
 ## Quick start
@@ -218,6 +213,44 @@ The SDK packet gives you:
 - `compressed_context` for the smallest grounded repo slice
 - `response_policy` for output length and format control
 - `should_call_llm` to block weak model calls
+- `behavior boundaries` inside the context pack so LLMs can avoid misattributing nearby code
+
+## Retrieval architecture
+
+Chronicle’s retrieval path is now deliberately quality-first for synthesis queries:
+
+1. **Intent and concept planning**
+   - classify the query (`locator`, `performance`, `dataflow`, `refactor`, etc.)
+   - extract stable query concepts, not just raw keywords
+
+2. **Deterministic ranking**
+   - score symbols using exact matches, normalized concept matches, file proximity, graph proximity, patch hints, and session memory
+
+3. **Coverage-aware diversification**
+   - avoid collapsing onto only one strong symbol
+   - preserve cross-concept coverage when the question spans multiple behaviors or layers
+
+4. **Ownership-aware enrichment**
+   - expand anchor classes into key methods
+   - surface helper evidence from selected execution paths
+   - add boundary notes that distinguish direct ownership from adjacent runtime wiring
+
+5. **Focused compression**
+   - keep fuller bodies for anchor surfaces
+   - use query-aware excerpts for long support methods so relevant branches survive the token cut
+
+This means Chronicle is no longer just “top-k symbols under a budget.” It is trying to preserve the smallest grounded packet that still keeps behavior boundaries intact.
+
+## Comparing Chronicle vs baseline
+
+When you run `chronicle ab-test` or the sample Ollama comparison, read the results in this order:
+
+1. `Winner summary`
+2. `Grounded` / `Both grounded`
+3. `Input token reduction`
+4. `Answer similarity`
+
+High token reduction alone is not a quality win. Chronicle should only be treated as better when the answer stays on-task, grounded, and materially as useful as the baseline.
 - `prompt` when Chronicle recommends a model call
 - `selected_symbols` and `selected_files` for tracing and logging
 

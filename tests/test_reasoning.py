@@ -400,8 +400,10 @@ class ReasoningTests(unittest.TestCase):
             names = {symbol.name for symbol in context.selected_symbols}
             self.assertIn("ManagerAgent", names)
             self.assertIn("NudgeRuntime", names)
+            self.assertIn("ManagerAgent.run", names)
             self.assertTrue({"MemoryAgent", "add_reminder", "list_reminders"} & names)
             self.assertIn("add_reminder", context.compressed_context)
+            self.assertIn("no direct evidence here for reminder", context.compressed_context)
 
     def test_request_context_query_prefers_exact_class_symbol(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -817,14 +819,16 @@ class ReasoningTests(unittest.TestCase):
         response = client.get("/health")
 
         self.assertEqual(root_response.status_code, 200)
-        self.assertIn("Sharper context. Lower spend. Grounded output.", root_response.text)
+        self.assertIn("<title>Chronicle</title>", root_response.text)
         self.assertIn(">Chronicle<", root_response.text)
         self.assertIn("Run demo", root_response.text)
-        self.assertIn("value=\"demo\"", root_response.text)
         self.assertIn("Result model", root_response.text)
         self.assertIn("repo_url", root_response.text)
+        self.assertIn("Use as SDK", root_response.text)
+        self.assertIn("Use Chronicle as a Python SDK", root_response.text)
+        self.assertIn("Install from PyPI", root_response.text)
+        self.assertIn("pip install chronicle-sdk", root_response.text)
         self.assertNotIn(">Docs<", root_response.text)
-        self.assertNotIn(">Health<", root_response.text)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["status"], "ok")
 
@@ -852,7 +856,7 @@ class ReasoningTests(unittest.TestCase):
             )
 
             self.assertEqual(root_response.status_code, 200)
-            self.assertIn("Protected mode is enabled", root_response.text)
+            self.assertIn("id=\"api_key\"", root_response.text)
             self.assertEqual(unauthorized.status_code, 401)
             self.assertEqual(authorized.status_code, 200)
         finally:
@@ -860,6 +864,19 @@ class ReasoningTests(unittest.TestCase):
                 os.environ.pop("CHRONICLE_API_KEY", None)
             else:
                 os.environ["CHRONICLE_API_KEY"] = original_key
+
+    def test_hosted_service_shows_python_repo_hint_for_indexing_errors(self) -> None:
+        if importlib.util.find_spec("fastapi") is None:
+            return
+
+        from fastapi.testclient import TestClient
+
+        app = create_app()
+        client = TestClient(app)
+        root_response = client.get("/")
+
+        self.assertEqual(root_response.status_code, 200)
+        self.assertIn("Please use a repo with Python source files.", root_response.text)
 
 
 if __name__ == "__main__":

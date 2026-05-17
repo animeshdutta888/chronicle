@@ -14,7 +14,7 @@ class OllamaError(RuntimeError):
 class OllamaClient:
     """Small client for local Ollama generation and embedding calls."""
 
-    def __init__(self, base_url: str | None = None, timeout_seconds: int = 300) -> None:
+    def __init__(self, base_url: str | None = None, timeout_seconds: int = 600) -> None:
         self.base_url = (base_url or os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")).rstrip("/")
         env_timeout = os.getenv("OLLAMA_TIMEOUT_SECONDS")
         if env_timeout:
@@ -103,7 +103,7 @@ class OllamaClient:
         except TimeoutError as exc:
             raise OllamaError(
                 f"Ollama request to {url} timed out after {self.timeout_seconds}s. "
-                "Try a smaller context budget or set `OLLAMA_TIMEOUT_SECONDS=180` and retry."
+                "Try a smaller context budget or set `OLLAMA_TIMEOUT_SECONDS=600` and retry."
             ) from exc
         try:
             parsed = json.loads(body)

@@ -510,7 +510,11 @@ class Chronicle:
                 ],
             )
         comparison = {
-            "same_or_better_grounding": chronicle_validation.confidence >= baseline_validation.confidence - 0.1,
+            "same_or_better_grounding": chronicle_validation.grounded
+            and (
+                not baseline_validation.grounded
+                or chronicle_validation.confidence >= baseline_validation.confidence - 0.05
+            ),
             "both_grounded": baseline_validation.grounded and chronicle_validation.grounded,
             "answer_similarity": self._token_overlap(baseline_answer, chronicle_answer),
             "input_token_reduction_percent": round(
@@ -922,24 +926,33 @@ class Chronicle:
 
     def _response_policy(self, *, query: str, context: ContextPack) -> dict[str, Any]:
         lowered = query.lower()
+        decision = context.llm_decision
         if "where is" in lowered or "which file" in lowered or "defined" in lowered:
             output_format = "short locator"
             verbosity = "minimal"
             section_budget = 2
+            target_output_tokens = 180
         elif any(keyword in lowered for keyword in ("how", "improve", "better", "refactor", "upgrade")):
-            output_format = "compact plan"
+            if decision and decision.expected_value in {"cross-cutting explanation", "low-cost synthesis"}:
+                output_format = "grounded explanation"
+                section_budget = 5
+                target_output_tokens = 360
+            else:
+                output_format = "compact plan"
+                section_budget = 4
+                target_output_tokens = 260
             verbosity = "concise"
-            section_budget = 4
         else:
             output_format = "grounded summary"
             verbosity = "concise"
             section_budget = 3
+            target_output_tokens = 240
 
-        max_output_tokens = 220
-        if context.llm_decision and context.llm_decision.max_output_tokens:
-            max_output_tokens = min(context.llm_decision.max_output_tokens, 220)
-        if not (context.llm_decision and context.llm_decision.call_llm):
-            max_output_tokens = min(max_output_tokens, 160)
+        max_output_tokens = target_output_tokens
+        if decision and decision.max_output_tokens:
+            max_output_tokens = min(decision.max_output_tokens, target_output_tokens)
+        if not (decision and decision.call_llm):
+            max_output_tokens = min(max_output_tokens, 180)
 
         return {
             "output_format": output_format,

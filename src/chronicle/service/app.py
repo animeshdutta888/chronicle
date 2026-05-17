@@ -872,7 +872,8 @@ button:hover {
                   <p class="hero-copy">Reduce token spend. Improve grounded code generation. Reuse codebase memory across workflows.</p>
                   <div class="hero-actions">
                     <a class="button primary hero-link" href="#workspace">Get Started</a>
-                    <a class="button secondary hero-link" href="#architecture">View Architecture</a>
+                    <button class="button secondary" id="open_sdk_modal" type="button">Use as SDK</button>
+                    <a class="button tertiary hero-link" href="#architecture">View Architecture</a>
                   </div>
                   <div class="chip-row">
                     <span class="impact-chip">Lower AI Cost</span>
@@ -939,8 +940,8 @@ button:hover {
           <div class="panel" id="result-model">
             <div class="panel-inner meta-card">
               <span class="meta-kicker">Integrations</span>
-              <h2>SDK, CLI, and MCP</h2>
-              <p>Use Chronicle through the hosted workspace now, with the same context layer ready for SDK and MCP-driven agent workflows.</p>
+              <h2>SDK and agent surfaces</h2>
+              <p>Use the hosted workspace now, or plug the same context layer into your Python SDK, CLI, or MCP workflow.</p>
             </div>
           </div>
 
@@ -999,6 +1000,43 @@ button:hover {
             </div>
           </div>
         </section>
+
+      </div>
+      <div id="sdk_modal" class="modal-backdrop" aria-hidden="true">
+        <div class="modal" role="dialog" aria-modal="true" aria-labelledby="sdk_modal_title">
+          <div class="modal-head">
+            <h3 id="sdk_modal_title">Use Chronicle as a Python SDK</h3>
+            <button id="sdk_modal_close" class="modal-close" type="button" aria-label="Close modal">×</button>
+          </div>
+          <div class="modal-body">
+            <div class="result-grid">
+              <div class="result-card">
+                <span class="result-label">Access</span>
+                <p class="result-summary">Install from PyPI, then run Chronicle locally against your own repository before any LLM call.</p>
+              </div>
+              <div class="result-card">
+                <span class="result-label">Flow</span>
+                <p class="result-summary">Install Chronicle, build a grounded packet, then pass <code>packet.prompt</code> or <code>packet.compressed_context</code> into your own LLM or agent stack.</p>
+              </div>
+            </div>
+            <div class="result-card" style="margin-top: 12px;">
+              <span class="result-label">Install</span>
+              <pre>pip install chronicle-sdk</pre>
+            </div>
+            <div class="result-card" style="margin-top: 12px;">
+              <span class="result-label">Quickstart</span>
+              <pre>from chronicle import Chronicle
+
+chronicle = Chronicle(repo_path="./repo")
+packet = chronicle.prepare_prompt_packet(
+    query="How should I refactor the retry path?",
+    token_budget=3000,
+)
+
+prompt = packet.prompt if packet.should_call_llm and packet.prompt else packet.compressed_context</pre>
+            </div>
+          </div>
+        </div>
       </div>
       <div id="raw_payload_modal" class="modal-backdrop" aria-hidden="true">
         <div class="modal" role="dialog" aria-modal="true" aria-labelledby="raw_payload_title">
@@ -1015,12 +1053,27 @@ button:hover {
       <script>
         const button = document.getElementById("run_demo");
         const resultBox = document.getElementById("result_box");
+        const sdkModal = document.getElementById("sdk_modal");
+        const sdkModalOpen = document.getElementById("open_sdk_modal");
+        const sdkModalClose = document.getElementById("sdk_modal_close");
         const rawPayloadModal = document.getElementById("raw_payload_modal");
         const rawPayloadContent = document.getElementById("raw_payload_content");
         const rawPayloadTitle = document.getElementById("raw_payload_title");
         const rawPayloadClose = document.getElementById("raw_payload_close");
         let activeRawPayload = null;
         let activeRawTitle = "Raw payload";
+        function openSdkModal() {
+          if (!sdkModal) return;
+          sdkModal.classList.add("is-open");
+          sdkModal.setAttribute("aria-hidden", "false");
+          document.body.style.overflow = "hidden";
+        }
+        function closeSdkModal() {
+          if (!sdkModal) return;
+          sdkModal.classList.remove("is-open");
+          sdkModal.setAttribute("aria-hidden", "true");
+          document.body.style.overflow = rawPayloadModal && rawPayloadModal.classList.contains("is-open") ? "hidden" : "";
+        }
         function openRawPayloadModal() {
           if (!activeRawPayload || !rawPayloadModal || !rawPayloadContent || !rawPayloadTitle) return;
           rawPayloadTitle.textContent = activeRawTitle;
@@ -1033,7 +1086,14 @@ button:hover {
           if (!rawPayloadModal) return;
           rawPayloadModal.classList.remove("is-open");
           rawPayloadModal.setAttribute("aria-hidden", "true");
-          document.body.style.overflow = "";
+          document.body.style.overflow = sdkModal && sdkModal.classList.contains("is-open") ? "hidden" : "";
+        }
+        if (sdkModalOpen) sdkModalOpen.addEventListener("click", openSdkModal);
+        if (sdkModalClose) sdkModalClose.addEventListener("click", closeSdkModal);
+        if (sdkModal) {
+          sdkModal.addEventListener("click", event => {
+            if (event.target === sdkModal) closeSdkModal();
+          });
         }
         if (rawPayloadClose) rawPayloadClose.addEventListener("click", closeRawPayloadModal);
         if (rawPayloadModal) {
@@ -1042,7 +1102,10 @@ button:hover {
           });
         }
         document.addEventListener("keydown", event => {
-          if (event.key === "Escape") closeRawPayloadModal();
+          if (event.key === "Escape") {
+            closeRawPayloadModal();
+            closeSdkModal();
+          }
         });
         function renderEmptyState() {
           return `
@@ -1068,15 +1131,36 @@ button:hover {
           `;
         }
         function renderErrorState(message, payload = null) {
+          const friendly = normalizeErrorMessage(message);
           return `
             <div class="error-state">
               <div>
                 <b>Request blocked</b>
-                <p>${escapeHtml(message)}</p>
+                <p>${escapeHtml(friendly)}</p>
               </div>
               ${payload ? `<details><summary>Response details</summary>${renderJson(payload)}</details>` : ""}
             </div>
           `;
+        }
+        function normalizeErrorMessage(message) {
+          const text = String(message || "");
+          const lowered = text.toLowerCase();
+          if (
+            lowered.includes("did not index any python symbols")
+            || lowered.includes("no python files were found")
+            || lowered.includes("no python symbols were indexed")
+          ) {
+            return "Chronicle works best on repositories with structured .py files. Please use a repo with Python source files.";
+          }
+          if (
+            lowered.includes("repository not found")
+            || lowered.includes("could not read username for 'https://github.com'")
+            || lowered.includes("fatal:")
+            || lowered.includes("not a git repository")
+          ) {
+            return "Repository could not be indexed. Please use a reachable repo with structured .py files, or provide local access for private repositories.";
+          }
+          return text;
         }
         function escapeHtml(value) {
           return String(value ?? "")
