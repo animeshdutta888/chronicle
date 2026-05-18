@@ -2,7 +2,19 @@
 
 Chronicle is an **AI Context Operating System for Coding Agents**.
 
+> **Alpha Release**  
+> Chronicle is live as an early Python-first alpha. The core context engine is usable today, while language coverage, hosted workflows, and evaluation depth are still expanding.
+
+> **Current limitation:** Chronicle is currently best for structured Python `.py` repositories.
+
 It indexes repository structure, ranks the smallest useful context for a coding task, compresses that context to fit a token budget, records provenance for every chunk, and decides whether an LLM is needed at all.
+
+## Why Chronicle
+
+- Reduce prompt tokens before the LLM call
+- Keep answers grounded in real files, symbols, and flow
+- Reuse context across CLI, SDK, hosted, and agent workflows
+- Block low-signal model calls before they waste budget
 
 ## What Chronicle optimizes
 
@@ -56,6 +68,12 @@ pip install chronicle-sdk
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
+```
+
+Or install the public SDK directly:
+
+```bash
+pip install chronicle-sdk
 ```
 
 Run the hosted alpha API locally:
@@ -262,6 +280,14 @@ PYTHONPATH=src python3 examples/sample_nudge_sdk_ollama.py \
   --model qwen2.5:14b-instruct
 ```
 
+Run the SDK-first single-packet example to print packet stats, token reduction, and one Ollama response:
+
+```bash
+PYTHONPATH=src python3 examples/sdk_sample.py \
+  --repo /Users/animeshdutta/Projects/Nudge_git/Nudge \
+  --model qwen2.5:14b-instruct
+```
+
 Run the same example in comparison mode to print baseline vs Chronicle token usage and both model responses:
 
 ```bash
@@ -363,6 +389,7 @@ Evaluation Layer
 
 ## Notes
 
+- Chronicle is currently an alpha release: strongest on Python-repo contexting, still maturing in hosted workflows, language coverage, and benchmark depth.
 - Chronicle is local-first and does not send repository code anywhere by default.
 - Index artifacts are stored in `.chronicle/index.sqlite3` and mirrored to `.chronicle/index.json` unless `index_dir` is overridden.
 - Session memory is stored locally in `.chronicle/sessions.sqlite3`.

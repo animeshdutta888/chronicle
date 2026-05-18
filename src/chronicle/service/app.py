@@ -1448,7 +1448,7 @@ prompt = packet.prompt if packet.should_call_llm and packet.prompt else packet.c
 
     @app.get("/health")
     def health() -> dict[str, str]:
-        return {"status": "ok", "service": "chronicle-api"}
+        return {"status": "ok"}
 
     @app.post("/index")
     def index_repo(request: RepoRequest, x_api_key: str | None = Header(default=None)) -> dict[str, Any]:
