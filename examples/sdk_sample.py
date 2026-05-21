@@ -16,7 +16,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--repo",
-        default="/Users/animeshdutta/Projects/Nudge_git/Nudge",
+        default=".",
         help="Absolute path to the local repository Chronicle should index.",
     )
     parser.add_argument(

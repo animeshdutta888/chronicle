@@ -10,12 +10,16 @@ import subprocess
 from chronicle import Chronicle
 from chronicle import cli as chronicle_cli
 from chronicle.integrations import ChronicleMCPServer
+from chronicle.mcp_stdio import ChronicleMCPStdioServer
 from chronicle.integrations.langgraph_node import ChronicleContextNode
 from chronicle.llm.guardrails import Guardrails
 from chronicle.llm.router import LLMRouter
 from chronicle.retrieval.query_planner import DeterministicQueryPlanner
 from chronicle.service.app import create_app
 from chronicle.core.models import ValidationResult
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 @dataclass
@@ -804,6 +808,106 @@ class ReasoningTests(unittest.TestCase):
                 },
             )
             self.assertEqual(len(updated["phases"]), 1)
+
+    def test_mcp_server_exposes_prompt_packet_and_session_tools(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "agent.py").write_text(
+                "class ManagerAgent:\n"
+                "    def run(self):\n"
+                "        return 'ok'\n",
+                encoding="utf-8",
+            )
+
+            server = ChronicleMCPServer(repo_path=root)
+            session = server.handle("session_start", {"session_id": "demo-session"})
+            packet = server.handle(
+                "prepare_prompt_packet",
+                {
+                    "query": "Where is ManagerAgent.run defined?",
+                    "token_budget": 450,
+                    "session_id": session["session_id"],
+                },
+            )
+            stored = server.handle("session_show", {"session_id": session["session_id"]})
+
+            self.assertEqual(session["session_id"], "demo-session")
+            self.assertEqual(packet["query"], "Where is ManagerAgent.run defined?")
+            self.assertIn("selected_symbols", packet)
+            self.assertEqual(stored["session_id"], "demo-session")
+
+    def test_mcp_stdio_server_supports_initialize_and_tools(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "agent.py").write_text(
+                "class ManagerAgent:\n"
+                "    def run(self):\n"
+                "        return 'ok'\n",
+                encoding="utf-8",
+            )
+
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(PROJECT_ROOT / "src")
+            proc = subprocess.Popen(
+                [str(PROJECT_ROOT / ".venv" / "bin" / "python"), "-m", "chronicle.mcp_stdio", "--repo", str(root)],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=False,
+                env=env,
+            )
+            assert proc.stdin is not None
+            assert proc.stdout is not None
+
+            def rpc(payload: dict[str, object]) -> dict[str, object]:
+                body = json.dumps(payload).encode("utf-8") + b"\n"
+                proc.stdin.write(body)
+                proc.stdin.flush()
+                response_body = proc.stdout.readline()
+                return json.loads(response_body.decode("utf-8"))
+
+            try:
+                initialize = rpc(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "initialize",
+                        "params": {
+                            "protocolVersion": "2025-03-26",
+                            "capabilities": {},
+                            "clientInfo": {"name": "chronicle-test", "version": "1.0"},
+                        },
+                    }
+                )
+                tools = rpc(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 2,
+                        "method": "tools/list",
+                        "params": {},
+                    }
+                )
+                resources = rpc(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 3,
+                        "method": "resources/list",
+                        "params": {},
+                    }
+                )
+
+                self.assertEqual(initialize["result"]["serverInfo"]["name"], "chronicle-mcp")
+                self.assertTrue(any(tool["name"] == "context" for tool in tools["result"]["tools"]))
+                self.assertTrue(any(resource["uri"] == "chronicle://server-info" for resource in resources["result"]["resources"]))
+            finally:
+                proc.kill()
+                proc.wait(timeout=5)
+                if proc.stdin is not None:
+                    proc.stdin.close()
+                if proc.stdout is not None:
+                    proc.stdout.close()
+                if proc.stderr is not None:
+                    proc.stderr.close()
 
     def test_hosted_service_dependency_hint_or_health_route(self) -> None:
         if importlib.util.find_spec("fastapi") is None:

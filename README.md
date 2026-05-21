@@ -83,6 +83,13 @@ pip install -e .[hosted]
 chronicle-api
 ```
 
+Run Chronicle as a stdio MCP server:
+
+```bash
+pip install -e .
+chronicle-mcp --repo /path/to/repo
+```
+
 Index a repository:
 
 ```bash
@@ -233,6 +240,62 @@ The SDK packet gives you:
 - `should_call_llm` to block weak model calls
 - `behavior boundaries` inside the context pack so LLMs can avoid misattributing nearby code
 
+## MCP server
+
+Chronicle includes a stdio MCP server built on the official Python MCP SDK. It can plug into MCP-capable clients such as Claude Desktop, Codex-compatible MCP hosts, Gemini-compatible MCP hosts, or any other client that launches local stdio MCP servers.
+
+Start it like this:
+
+```bash
+chronicle-mcp --repo /path/to/repo
+```
+
+Or, if you are running from the repo without installing the script globally:
+
+```bash
+python -m chronicle.mcp_stdio --repo /path/to/repo
+```
+
+Configure your MCP client to launch that command over stdio. Most clients expose this as a server entry with:
+
+- command: `chronicle-mcp`
+- args: `["--repo", "/path/to/repo"]`
+
+Codex CLI setup:
+
+```bash
+codex mcp add chronicle -- chronicle-mcp --repo /path/to/repo
+```
+
+If you installed Chronicle in a virtual environment, point Codex at the environment's script:
+
+```bash
+codex mcp add chronicle -- /path/to/chronicle/.venv/bin/chronicle-mcp --repo /path/to/repo
+```
+
+Restart Codex after adding the server so the MCP client starts a fresh connection.
+
+Chronicle MCP tools:
+
+- `index`
+- `context`
+- `evaluate`
+- `doctor`
+- `call_chain`
+- `prepare_prompt_packet`
+- `session_start`
+- `session_show`
+- `bus_start`
+- `bus_context`
+- `bus_handoff`
+- `bus_show`
+- `bus_validate_latest`
+- `bus_summary`
+
+Most teams will configure one Chronicle MCP server per repository. For advanced setups, the MCP tools also accept optional `repo_path` and `index_dir` overrides on each call.
+
+Chronicle also exposes `chronicle://server-info` as a lightweight MCP resource so clients can verify that the server is connected.
+
 ## Retrieval architecture
 
 Chronicle’s retrieval path is now deliberately quality-first for synthesis queries:
@@ -272,11 +335,11 @@ High token reduction alone is not a quality win. Chronicle should only be treate
 - `prompt` when Chronicle recommends a model call
 - `selected_symbols` and `selected_files` for tracing and logging
 
-Run the local SDK example against the Nudge repo with Ollama:
+Run the local SDK example against a repo with Ollama:
 
 ```bash
 PYTHONPATH=src python3 examples/sample_nudge_sdk_ollama.py \
-  --repo /Users/animeshdutta/Projects/Nudge_git/Nudge \
+  --repo /path/to/repo \
   --model qwen2.5:14b-instruct
 ```
 
@@ -284,7 +347,7 @@ Run the SDK-first single-packet example to print packet stats, token reduction, 
 
 ```bash
 PYTHONPATH=src python3 examples/sdk_sample.py \
-  --repo /Users/animeshdutta/Projects/Nudge_git/Nudge \
+  --repo /path/to/repo \
   --model qwen2.5:14b-instruct
 ```
 
@@ -292,7 +355,7 @@ Run the same example in comparison mode to print baseline vs Chronicle token usa
 
 ```bash
 PYTHONPATH=src python3 examples/sample_nudge_sdk_ollama.py \
-  --repo /Users/animeshdutta/Projects/Nudge_git/Nudge \
+  --repo /path/to/repo \
   --model qwen2.5:14b-instruct \
   --compare
 ```

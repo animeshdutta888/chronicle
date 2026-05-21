@@ -4,15 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "chronicle-sdk"
-version = "0.1.0"
+version = "0.1.1"
 description = "Python SDK for grounded context compression and LLM routing in coding workflows."
 readme = "README.md"
 requires-python = ">=3.11"
-authors = [
-  { name = "Animesh Dutta" }
-]
 dependencies = [
   "GitPython>=3.1.43",
+  "mcp>=1.27,<2",
   "numpy>=1.26",
   "pydantic>=2.8",
 ]
@@ -25,6 +23,7 @@ treesitter = ["tree-sitter>=0.25.0", "tree-sitter-python>=0.23.0"]
 [project.scripts]
 chronicle = "chronicle.cli:main"
 chronicle-api = "chronicle.service.app:main"
+chronicle-mcp = "chronicle.mcp_stdio:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
