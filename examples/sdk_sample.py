@@ -4,98 +4,81 @@ import argparse
 from pathlib import Path
 
 from chronicle import Chronicle
-from chronicle.llm.providers import OllamaError, OllamaProvider
 
 
-DEFAULT_QUERY = "How does ManagerAgent orchestrate reminders and memory?"
+DEFAULT_REPO = "/Users/animeshdutta/Projects/Nudge_git"
+DEFAULT_TASK = "Improve ManagerAgent.run reminder orchestration safely"
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="SDK-first Chronicle example: build one prompt packet, call Ollama, and print packet stats."
+        description="Chronicle SDK full-cycle example: prepare, status, review, and handoff."
     )
     parser.add_argument(
         "--repo",
-        default=".",
-        help="Absolute path to the local repository Chronicle should index.",
+        default=DEFAULT_REPO,
+        help="Local repository to analyze. Defaults to the local Nudge repo path used during development.",
     )
     parser.add_argument(
-        "--query",
-        default=DEFAULT_QUERY,
-        help="Question to ask about the repository.",
+        "--task",
+        default=DEFAULT_TASK,
+        help="Task to prepare for the coding agent.",
     )
     parser.add_argument(
-        "--model",
-        default="qwen2.5:14b-instruct",
-        help="Local Ollama model name.",
+        "--tests",
+        default=None,
+        help="Optional test command/result to include in the handoff, for example: 'pytest tests/test_manager.py passed'.",
     )
     parser.add_argument(
         "--token-budget",
         type=int,
         default=3000,
-        help="Chronicle token budget for the compressed context pack.",
+        help="Chronicle token budget for prepare/review packets.",
     )
     args = parser.parse_args()
 
     repo_path = Path(args.repo).expanduser().resolve()
     chronicle = Chronicle(repo_path=repo_path)
-    provider = OllamaProvider()
 
-    packet = chronicle.prepare_prompt_packet(
-        query=args.query,
+    print("1. Prepare context for the coding agent")
+    prepared = chronicle.prepare(args.task, token_budget=args.token_budget)
+    print(f"Prepared: {prepared['saved']['context_md']}")
+    print(f"Selected files: {', '.join(prepared['selected_files']) or 'none'}")
+    print()
+
+    print("2. Check Chronicle status")
+    status = chronicle.status()
+    print(f"Index: {status['index_status']} ({status['symbol_count']} symbols)")
+    print(f"Changed files: {', '.join(status['changed_files']) or 'none'}")
+    print()
+
+    print("3. Review recent changes")
+    review = chronicle.review(
+        "Review recent changes and impacted tests for this task",
         token_budget=args.token_budget,
     )
-    report = chronicle.evaluate(
-        query=args.query,
-        token_budget=args.token_budget,
+    print(f"Review: {review['saved']['review_md']}")
+    print(f"Related tests: {', '.join(review['related_tests']) or 'none found'}")
+    if review["warnings"]:
+        print("Review warnings:")
+        for warning in review["warnings"]:
+            print(f"- {warning}")
+    print()
+
+    print("4. Create handoff")
+    handoff = chronicle.handoff(
+        task=args.task,
+        tests=args.tests,
+        notes=[
+            "Use the prepare packet before implementation.",
+            "Use the review packet after edits and tests.",
+        ],
     )
-
-    print("Chronicle SDK packet")
-    print(f"Query: {args.query}")
-    print(f"Should call LLM: {packet.should_call_llm}")
-    print(f"Selected symbols: {', '.join(packet.selected_symbols) or 'none'}")
-    print(f"Estimated input tokens: {packet.estimated_input_tokens}")
-    print(f"Response policy: {packet.response_policy}")
-    print()
-    print("Token summary")
-    print(f"Baseline tokens: {report.baseline_tokens}")
-    print(f"Chronicle tokens: {report.chronicle_tokens}")
-    print(f"Reduction: {report.token_reduction_percent}%")
-    print(f"Grounding score: {report.answer_grounding_score}")
-    print(f"Recommendation: {report.recommendation}")
+    print(f"Handoff: {handoff['saved']['handoff_md']}")
     print()
 
-    if not packet.should_call_llm or not packet.prompt:
-        print("Chronicle recommends skipping the model call for this query.")
-        print()
-        print("Compressed context preview:")
-        print(packet.compressed_context[:1200])
-        return
-
-    try:
-        response_text = provider.generate_text(args.model, packet.prompt)
-    except OllamaError as exc:
-        print(f"Ollama request failed: {exc}")
-        return
-
-    print("Prompt preview")
-    print(packet.prompt[:1500])
-    print()
-    print("Model response")
-    print(response_text or "<empty response>")
-    print()
-
-    context = chronicle.context(args.query, token_budget=args.token_budget, remember=False)
-    validation = chronicle.validate_output(response_text or "", context)
-    print("Validation")
-    print(
-        f"Valid: {validation.valid} | Grounded: {validation.grounded} | "
-        f"Confidence: {validation.confidence:.2f}"
-    )
-    if validation.issues:
-        print("Issues:")
-        for issue in validation.issues:
-            print(f"- {issue}")
+    print("Cycle")
+    print("prepare -> agent edits -> tests -> review -> handoff")
 
 
 if __name__ == "__main__":

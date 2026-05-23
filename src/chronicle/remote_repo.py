@@ -14,7 +14,7 @@ def resolve_repo_path(
 ) -> Path:
     """Return a local repository path, cloning/pulling when repo_url is provided."""
     if repo_url:
-        base_dir = Path(repos_dir) if repos_dir else Path.cwd() / ".chronicle" / "repos"
+        base_dir = Path(repos_dir) if repos_dir else Path.cwd() / "chronicle_logs" / "repos"
         target = _target_path(base_dir, repo_url)
         if not target.exists():
             _run_git(["clone", repo_url, str(target)], cwd=base_dir.parent)

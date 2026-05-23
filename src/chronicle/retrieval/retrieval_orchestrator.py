@@ -96,6 +96,7 @@ class RetrievalOrchestrator:
                 snapshot=snapshot,
                 selected_symbols=selected_symbols,
                 max_depth=4,
+                preferred_terms=self._call_chain_preferred_terms(plan),
             )
             if call_chain and call_chain.summary:
                 chain_section = "Functional call chain:\n" + call_chain.summary
@@ -146,6 +147,7 @@ class RetrievalOrchestrator:
             memory_summary=memory_summary,
             call_chain=call_chain,
         )
+        call_chain_warning = self._call_chain_warning(plan=plan, call_chain=call_chain)
         priorities_section = self._context_priorities_section(
             selected_symbols=selected_symbols,
             excluded_symbols=excluded_symbols,
@@ -164,6 +166,11 @@ class RetrievalOrchestrator:
                 estimated_tokens = self.budget_manager.estimate_tokens(combined)
         if coverage_section:
             combined = coverage_section + ("\n\n" + compressed_context if compressed_context else "")
+            if self.budget_manager.fits(combined, budget):
+                compressed_context = combined
+                estimated_tokens = self.budget_manager.estimate_tokens(combined)
+        if call_chain_warning:
+            combined = call_chain_warning + ("\n\n" + compressed_context if compressed_context else "")
             if self.budget_manager.fits(combined, budget):
                 compressed_context = combined
                 estimated_tokens = self.budget_manager.estimate_tokens(combined)
@@ -702,9 +709,15 @@ class RetrievalOrchestrator:
             return ""
         anchors = [symbol.name for symbol in selected_symbols if symbol.id in exact_seed_ids][:4]
         supporting = [symbol.name for symbol in selected_symbols if symbol.id not in exact_seed_ids][:4]
+        verification = [
+            symbol.file_path
+            for symbol in selected_symbols
+            if "test" in symbol.file_path.lower()
+        ][:4]
         lines = ["Context priorities:"]
-        lines.append(f"- Anchor symbols: {', '.join(anchors) or selected_symbols[0].name}")
-        lines.append(f"- Supporting symbols: {', '.join(supporting) or 'none'}")
+        lines.append(f"- Primary context: {', '.join(anchors) or selected_symbols[0].name}")
+        lines.append(f"- Supporting context: {', '.join(supporting) or 'none'}")
+        lines.append(f"- Verification context: {', '.join(dict.fromkeys(verification)) or 'none found'}")
         if excluded_symbols:
             lines.append(f"- Omitted symbols due to budget: {len(excluded_symbols)}")
         return "\n".join(lines)
@@ -755,8 +768,54 @@ class RetrievalOrchestrator:
         lowered = query.lower()
         if plan.intent in {"edit", "refactor", "architecture", "debug", "performance", "dataflow"}:
             return True
-        trigger_phrases = ("call chain", "trace", "flow", "path", "reach", "through", "orchestrate")
-        return any(phrase in lowered for phrase in trigger_phrases)
+        trigger_phrases = (
+            "call chain",
+            "trace",
+            "flow",
+            "path",
+            "reach",
+            "through",
+            "orchestrate",
+            "logic",
+            "drafted",
+            "well drafted",
+            "review",
+        )
+        if any(phrase in lowered for phrase in trigger_phrases):
+            return True
+
+        concepts = self._query_concepts(plan)
+        if not concepts:
+            return False
+        return any(symbol.calls and self._symbol_concepts(symbol, concepts) for symbol in selected_symbols[:4])
+
+    def _call_chain_preferred_terms(self, plan: QueryPlan) -> set[str]:
+        concepts = self._query_concepts(plan)
+        normalized_candidates = {
+            self._normalize_concept(candidate)
+            for candidate in plan.candidate_symbols
+        }
+        leaf_candidates = {
+            self._normalize_concept(candidate.split(".")[-1])
+            for candidate in plan.candidate_symbols
+        }
+        return {term for term in concepts | normalized_candidates | leaf_candidates if term}
+
+    def _call_chain_warning(self, *, plan: QueryPlan, call_chain) -> str:
+        if call_chain is None or not call_chain.entry_symbol:
+            return ""
+        preferred = self._call_chain_preferred_terms(plan)
+        if not preferred:
+            return ""
+        entry = self._normalize_concept(call_chain.entry_symbol.split(".")[-1])
+        if entry in preferred or any(term in self._normalize_concept(call_chain.entry_symbol) for term in preferred):
+            return ""
+        strongest = sorted(preferred)[0]
+        return (
+            "Call-chain warning:\n"
+            f"- Entry symbol {call_chain.entry_symbol} does not directly match task keyword `{strongest}`; "
+            "verify the selected flow before relying on it."
+        )
 
     def _behavior_boundaries_section(self, *, plan: QueryPlan, selected_symbols: list[Symbol]) -> str:
         if plan.intent not in {"explain", "dataflow", "architecture", "performance", "debug", "refactor", "edit"}:

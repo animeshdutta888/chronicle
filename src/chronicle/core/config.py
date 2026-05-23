@@ -12,6 +12,7 @@ class ChronicleConfig:
         default_factory=lambda: {
             ".git",
             ".chronicle",
+            "chronicle_logs",
             ".venv",
             "venv",
             "__pycache__",
@@ -47,5 +48,5 @@ class ChronicleConfig:
     @classmethod
     def from_paths(cls, repo_path: str | Path, index_dir: str | Path | None = None) -> "ChronicleConfig":
         repo = Path(repo_path).resolve()
-        index = Path(index_dir).resolve() if index_dir else repo / ".chronicle"
+        index = Path(index_dir).resolve() if index_dir else repo / "chronicle_logs"
         return cls(repo_path=repo, index_dir=index)

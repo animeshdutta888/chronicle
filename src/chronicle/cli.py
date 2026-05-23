@@ -39,6 +39,81 @@ def build_parser() -> argparse.ArgumentParser:
         context_parser.add_argument("--session-id", default=None, help="Optional Chronicle session id for multi-turn memory.")
         context_parser.add_argument("--view", choices=["compact", "full"], default="compact", help="Compact human view or full machine detail.")
 
+    prepare_parser = subparsers.add_parser("prepare", help="Prepare a grounded context packet for a coding agent.")
+    prepare_parser.add_argument("query", help="Coding task to prepare context for.")
+    prepare_parser.add_argument("--repo", default=".", help="Path to the git repository or local codebase.")
+    prepare_parser.add_argument("--repo-url", default=None, help="Git URL to clone/pull before analysis.")
+    prepare_parser.add_argument("--repos-dir", default=None, help="Directory used for cloned remote repositories.")
+    prepare_parser.add_argument("--branch", default=None, help="Optional branch to checkout/pull.")
+    prepare_parser.add_argument("--index-dir", default=None, help="Directory containing Chronicle artifacts.")
+    prepare_parser.add_argument("--token-budget", type=int, default=None, help="Override token budget.")
+    prepare_parser.add_argument("--session-id", default=None, help="Optional Chronicle session id for multi-turn memory.")
+    prepare_parser.add_argument("--target", choices=["codex", "claude", "cursor", "generic"], default="generic", help="Agent packet target.")
+    prepare_parser.add_argument("--view", choices=["compact", "full"], default="compact", help="Compact human view or full machine detail.")
+    prepare_parser.add_argument("--no-auto-index", action="store_true", help="Fail instead of auto-indexing when no index exists.")
+    prepare_parser.add_argument("--force-reindex", action="store_true", help="Rebuild the index before preparing context.")
+
+    replay_parser = subparsers.add_parser("replay", help="Replay saved Chronicle prepare runs without recomputing context.")
+    replay_parser.add_argument("--repo", default=".", help="Path to the git repository or local codebase.")
+    replay_parser.add_argument("--repo-url", default=None, help="Git URL to clone/pull before analysis.")
+    replay_parser.add_argument("--repos-dir", default=None, help="Directory used for cloned remote repositories.")
+    replay_parser.add_argument("--branch", default=None, help="Optional branch to checkout/pull.")
+    replay_parser.add_argument("--index-dir", default=None, help="Directory containing Chronicle artifacts.")
+    replay_parser.add_argument("--latest", action="store_true", help="Replay the latest prepared run.")
+    replay_parser.add_argument("--list", action="store_true", help="List saved prepared runs.")
+    replay_parser.add_argument("--run", default=None, help="Replay a specific run id.")
+    replay_parser.add_argument("--view", choices=["compact", "full"], default="compact", help="Compact human view or full machine detail.")
+
+    explain_parser = subparsers.add_parser("explain", help="Explain why a prepared run selected its context.")
+    explain_parser.add_argument("--repo", default=".", help="Path to the git repository or local codebase.")
+    explain_parser.add_argument("--repo-url", default=None, help="Git URL to clone/pull before analysis.")
+    explain_parser.add_argument("--repos-dir", default=None, help="Directory used for cloned remote repositories.")
+    explain_parser.add_argument("--branch", default=None, help="Optional branch to checkout/pull.")
+    explain_parser.add_argument("--index-dir", default=None, help="Directory containing Chronicle artifacts.")
+    explain_parser.add_argument("--latest", action="store_true", help="Explain the latest prepared run.")
+    explain_parser.add_argument("--run", default=None, help="Explain a specific run id.")
+    explain_parser.add_argument("--view", choices=["compact", "full"], default="compact", help="Compact human view or full machine detail.")
+
+    inspect_parser = subparsers.add_parser("inspect", help="Inspect an indexed file or symbol.")
+    inspect_parser.add_argument("--repo", default=".", help="Path to the git repository or local codebase.")
+    inspect_parser.add_argument("--repo-url", default=None, help="Git URL to clone/pull before analysis.")
+    inspect_parser.add_argument("--repos-dir", default=None, help="Directory used for cloned remote repositories.")
+    inspect_parser.add_argument("--branch", default=None, help="Optional branch to checkout/pull.")
+    inspect_parser.add_argument("--index-dir", default=None, help="Directory containing Chronicle artifacts.")
+    inspect_parser.add_argument("--file", default=None, help="File path to inspect.")
+    inspect_parser.add_argument("--symbol", default=None, help="Symbol name to inspect.")
+    inspect_parser.add_argument("--view", choices=["compact", "full"], default="compact", help="Compact human view or full machine detail.")
+
+    status_parser = subparsers.add_parser("status", help="Show Chronicle index, change, and artifact status.")
+    status_parser.add_argument("--repo", default=".", help="Path to the git repository or local codebase.")
+    status_parser.add_argument("--repo-url", default=None, help="Git URL to clone/pull before analysis.")
+    status_parser.add_argument("--repos-dir", default=None, help="Directory used for cloned remote repositories.")
+    status_parser.add_argument("--branch", default=None, help="Optional branch to checkout/pull.")
+    status_parser.add_argument("--index-dir", default=None, help="Directory containing Chronicle artifacts.")
+    status_parser.add_argument("--view", choices=["compact", "full"], default="compact", help="Compact human view or full machine detail.")
+
+    review_parser = subparsers.add_parser("review", help="Prepare a grounded review packet for recent code changes.")
+    review_parser.add_argument("query", nargs="?", default="Review recent code changes and impacted tests", help="Review goal.")
+    review_parser.add_argument("--repo", default=".", help="Path to the git repository or local codebase.")
+    review_parser.add_argument("--repo-url", default=None, help="Git URL to clone/pull before analysis.")
+    review_parser.add_argument("--repos-dir", default=None, help="Directory used for cloned remote repositories.")
+    review_parser.add_argument("--branch", default=None, help="Optional branch to checkout/pull.")
+    review_parser.add_argument("--index-dir", default=None, help="Directory containing Chronicle artifacts.")
+    review_parser.add_argument("--token-budget", type=int, default=None, help="Override token budget.")
+    review_parser.add_argument("--session-id", default=None, help="Optional Chronicle session id for multi-turn memory.")
+    review_parser.add_argument("--view", choices=["compact", "full"], default="compact", help="Compact human view or full machine detail.")
+
+    handoff_parser = subparsers.add_parser("handoff", help="Create a concise handoff packet from latest prepare/review state.")
+    handoff_parser.add_argument("task", nargs="?", default=None, help="Optional handoff task title.")
+    handoff_parser.add_argument("--repo", default=".", help="Path to the git repository or local codebase.")
+    handoff_parser.add_argument("--repo-url", default=None, help="Git URL to clone/pull before analysis.")
+    handoff_parser.add_argument("--repos-dir", default=None, help="Directory used for cloned remote repositories.")
+    handoff_parser.add_argument("--branch", default=None, help="Optional branch to checkout/pull.")
+    handoff_parser.add_argument("--index-dir", default=None, help="Directory containing Chronicle artifacts.")
+    handoff_parser.add_argument("--tests", default=None, help="Optional tests run or test result summary.")
+    handoff_parser.add_argument("--note", action="append", default=None, help="Optional handoff note.")
+    handoff_parser.add_argument("--view", choices=["compact", "full"], default="compact", help="Compact human view or full machine detail.")
+
     evaluate_parser = subparsers.add_parser("evaluate", help="Compare Chronicle context against a baseline.")
     evaluate_parser.add_argument("query", help="Question to evaluate.")
     evaluate_parser.add_argument("--repo", default=".", help="Path to the git repository or local codebase.")
@@ -194,6 +269,85 @@ def main(argv: list[str] | None = None) -> int:
                 session_id=getattr(args, "session_id", None),
             )
             payload = context.model_dump() if args.view == "full" else _compact_context(context.model_dump())
+            print(_success(command=args.command, data=payload))
+            return 0
+
+        if args.command == "prepare":
+            payload = chronicle.prepare(
+                query=args.query,
+                token_budget=getattr(args, "token_budget", None),
+                session_id=getattr(args, "session_id", None),
+                target=getattr(args, "target", "generic"),
+                view=getattr(args, "view", "compact"),
+                auto_index=not getattr(args, "no_auto_index", False),
+                force_reindex=getattr(args, "force_reindex", False),
+            )
+            if args.view == "compact":
+                print(_prepare_text(payload))
+                return 0
+            print(_success(command=args.command, data=payload))
+            return 0
+
+        if args.command == "replay":
+            payload = chronicle.replay(
+                run_id=getattr(args, "run", None),
+                latest=getattr(args, "latest", False),
+                list_runs=getattr(args, "list", False),
+                view=getattr(args, "view", "compact"),
+            )
+            print(_success(command=args.command, data=payload))
+            return 0
+
+        if args.command == "explain":
+            payload = chronicle.explain(
+                run_id=getattr(args, "run", None),
+                latest=getattr(args, "latest", False),
+                view=getattr(args, "view", "compact"),
+            )
+            print(_success(command=args.command, data=payload))
+            return 0
+
+        if args.command == "inspect":
+            if bool(getattr(args, "file", None)) == bool(getattr(args, "symbol", None)):
+                raise ValueError("Use exactly one of `--file` or `--symbol`.")
+            if getattr(args, "file", None):
+                payload = chronicle.inspect_file(args.file, view=args.view)
+            else:
+                payload = chronicle.inspect_symbol(args.symbol, view=args.view)
+            print(_success(command=args.command, data=payload))
+            return 0
+
+        if args.command == "status":
+            payload = chronicle.status(view=args.view)
+            if args.view == "compact":
+                print(_status_text(payload))
+                return 0
+            print(_success(command=args.command, data=payload))
+            return 0
+
+        if args.command == "review":
+            payload = chronicle.review(
+                query=args.query,
+                token_budget=getattr(args, "token_budget", None),
+                session_id=getattr(args, "session_id", None),
+                view=args.view,
+            )
+            if args.view == "compact":
+                print(_review_text(payload))
+                return 0
+            print(_success(command=args.command, data=payload))
+            return 0
+
+        if args.command == "handoff":
+            payload = chronicle.handoff(
+                task=getattr(args, "task", None),
+                tests=getattr(args, "tests", None),
+                notes=getattr(args, "note", None),
+                view=args.view,
+            )
+            if args.view == "compact":
+                print(_handoff_text(payload))
+                return 0
             print(_success(command=args.command, data=payload))
             return 0
 
@@ -360,6 +514,110 @@ def _error(command: str, message: str) -> str:
         },
         indent=2,
     )
+
+
+def _prepare_text(data: dict) -> str:
+    warnings = data.get("warnings") or []
+    readiness = data.get("readiness") or {}
+    saved = data.get("saved") or {}
+    lines = [
+        "Chronicle prepared agent context",
+        "",
+        f"Task: {data.get('task')}",
+        f"Target: {data.get('target')}",
+        f"Selected: {len(data.get('selected_files', []))} files, {len(data.get('selected_symbols', []))} symbols, {len(data.get('related_tests', []))} related tests",
+        f"Readiness: {readiness.get('level', 'unknown')} - {readiness.get('reason', 'No readiness reason recorded.')}",
+        "",
+        "Selected files:",
+    ]
+    lines.extend(f"- {file_path}" for file_path in data.get("selected_files", []))
+    lines.extend(["", "Key symbols:"])
+    lines.extend(f"- {symbol}" for symbol in data.get("selected_symbols", [])[:8])
+    lines.extend(["", "Warnings:"])
+    lines.extend([f"- {warning}" for warning in warnings] or ["- none"])
+    lines.extend(
+        [
+            "",
+            "Saved:",
+            f"- {saved.get('context_md')}",
+            f"- {saved.get('run_json')}",
+            "",
+            f"Replay: chronicle replay --run {data.get('run_id')}",
+            f"Explain: chronicle explain --run {data.get('run_id')}",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _status_text(data: dict) -> str:
+    lines = [
+        "Chronicle status",
+        "",
+        f"Repo: {data.get('repo')}",
+        f"Index: {data.get('index_status')} ({data.get('symbol_count')} symbols)",
+        f"Changed Python files: {len(data.get('changed_files', []))}",
+    ]
+    if data.get("changed_files"):
+        lines.extend(["", "Changed files:"])
+        lines.extend(f"- {file_path}" for file_path in data.get("changed_files", []))
+    latest_prepare = data.get("latest_prepare") or {}
+    latest_review = data.get("latest_review") or {}
+    if latest_prepare or latest_review:
+        lines.extend(["", "Latest artifacts:"])
+        if latest_prepare:
+            lines.append(f"- prepare: {latest_prepare.get('run_id') or latest_prepare.get('id')}")
+        if latest_review:
+            lines.append(f"- review: {latest_review.get('id')}")
+    lines.extend(["", "Next steps:"])
+    lines.extend(f"- {step}" for step in data.get("next_steps", []))
+    return "\n".join(lines)
+
+
+def _review_text(data: dict) -> str:
+    saved = data.get("saved") or {}
+    warnings = data.get("warnings") or []
+    lines = [
+        "Chronicle reviewed recent changes",
+        "",
+        f"Review: {data.get('review_id')}",
+        f"Changed: {len(data.get('changed_files', []))} files, {len(data.get('changed_symbols', []))} symbols",
+        f"Related: {len(data.get('related_files', []))} files, {len(data.get('related_tests', []))} tests",
+        "",
+        "Changed files:",
+    ]
+    lines.extend([f"- {file_path}" for file_path in data.get("changed_files", [])] or ["- none"])
+    lines.extend(["", "Related tests:"])
+    lines.extend([f"- {file_path}" for file_path in data.get("related_tests", [])] or ["- none found"])
+    lines.extend(["", "Warnings:"])
+    lines.extend([f"- {warning}" for warning in warnings] or ["- none"])
+    lines.extend(
+        [
+            "",
+            "Saved:",
+            f"- {saved.get('review_md')}",
+            f"- {saved.get('review_json')}",
+            "",
+            "Handoff: chronicle handoff --tests \"<tests run>\"",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _handoff_text(data: dict) -> str:
+    saved = data.get("saved") or {}
+    lines = [
+        "Chronicle created handoff",
+        "",
+        f"Handoff: {data.get('handoff_id')}",
+        f"Task: {data.get('task')}",
+        f"Changed files: {len(data.get('changed_files', []))}",
+        f"Tests: {data.get('tests') or 'not recorded'}",
+        "",
+        "Saved:",
+        f"- {saved.get('handoff_md')}",
+        f"- {saved.get('handoff_json')}",
+    ]
+    return "\n".join(lines)
 
 
 def _doctor_next_steps(args: argparse.Namespace) -> dict[str, str]:

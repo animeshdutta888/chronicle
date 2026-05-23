@@ -93,6 +93,28 @@ class ChronicleMCPServer:
                 },
             },
             {
+                "name": "prepare",
+                "description": "Prepare a grounded context packet for a coding agent and save a replayable run.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        **common_query_props,
+                        "target": {
+                            "type": "string",
+                            "enum": ["codex", "claude", "cursor", "generic"],
+                            "description": "Agent packet target.",
+                        },
+                        "view": {
+                            "type": "string",
+                            "enum": ["compact", "full"],
+                            "description": "Compact response or full run artifact.",
+                        },
+                    },
+                    "required": ["query"],
+                    "additionalProperties": False,
+                },
+            },
+            {
                 "name": "prepare_prompt_packet",
                 "description": "Prepare a grounded prompt packet for an external LLM call.",
                 "inputSchema": {
@@ -105,6 +127,61 @@ class ChronicleMCPServer:
                         },
                     },
                     "required": ["query"],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "status",
+                "description": "Show Chronicle index, change, and artifact status.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        **common_repo_props,
+                        "view": {
+                            "type": "string",
+                            "enum": ["compact", "full"],
+                            "description": "Compact response or full status payload.",
+                        },
+                    },
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "review",
+                "description": "Prepare a grounded review packet for recent code changes.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        **common_query_props,
+                        "view": {
+                            "type": "string",
+                            "enum": ["compact", "full"],
+                            "description": "Compact response or full review artifact.",
+                        },
+                    },
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "handoff",
+                "description": "Create a concise handoff packet from latest prepare/review state.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        **common_repo_props,
+                        "task": {"type": "string", "description": "Optional handoff task title."},
+                        "tests": {"type": "string", "description": "Optional tests run or test result summary."},
+                        "notes": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Optional handoff notes.",
+                        },
+                        "view": {
+                            "type": "string",
+                            "enum": ["compact", "full"],
+                            "description": "Compact response or full handoff artifact.",
+                        },
+                    },
                     "additionalProperties": False,
                 },
             },
@@ -276,6 +353,14 @@ class ChronicleMCPServer:
                 session_id=arguments.get("session_id"),
                 max_depth=int(arguments.get("max_depth", 4)),
             )
+        if tool == "prepare":
+            return chronicle.prepare(
+                query=str(arguments["query"]),
+                token_budget=arguments.get("token_budget"),
+                session_id=arguments.get("session_id"),
+                target=str(arguments.get("target", "generic")),
+                view=str(arguments.get("view", "compact")),
+            )
         if tool == "prepare_prompt_packet":
             packet = chronicle.prepare_prompt_packet(
                 query=str(arguments["query"]),
@@ -284,6 +369,22 @@ class ChronicleMCPServer:
                 include_prompt=bool(arguments.get("include_prompt", True)),
             )
             return packet.model_dump()
+        if tool == "status":
+            return chronicle.status(view=str(arguments.get("view", "compact")))
+        if tool == "review":
+            return chronicle.review(
+                query=str(arguments.get("query", "Review recent code changes and impacted tests")),
+                token_budget=arguments.get("token_budget"),
+                session_id=arguments.get("session_id"),
+                view=str(arguments.get("view", "compact")),
+            )
+        if tool == "handoff":
+            return chronicle.handoff(
+                task=arguments.get("task"),
+                tests=arguments.get("tests"),
+                notes=arguments.get("notes"),
+                view=str(arguments.get("view", "compact")),
+            )
         if tool == "session_start":
             session = chronicle.start_session(session_id=arguments.get("session_id"))
             return session.model_dump()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import json
 from pathlib import Path
 import subprocess
 from typing import Any
@@ -413,6 +414,327 @@ class Chronicle:
             llm_decision_reason=context.llm_decision.reason if context.llm_decision else None,
         )
 
+    def prepare(
+        self,
+        query: str,
+        token_budget: int | None = None,
+        session_id: str | None = None,
+        *,
+        target: str = "generic",
+        view: str = "compact",
+        auto_index: bool = True,
+        force_reindex: bool = False,
+    ) -> dict[str, Any]:
+        if force_reindex:
+            self.index()
+        elif auto_index:
+            self._ensure_snapshot()
+        elif self._load_snapshot() is None:
+            raise ValueError("Chronicle has no index yet. Run `chronicle index` or omit `--no-auto-index`.")
+
+        context = self.context(query=query, token_budget=token_budget, session_id=session_id)
+        baseline = self.baseline_context(query=query, token_budget=max((token_budget or 3000) * 4, 12000))
+        selected_files = self._selected_files(context)
+        related_tests = self._related_tests(context)
+        selection_reasons = self._selection_reasons(context=context, query=query)
+        warnings = self._missing_context_warnings(query=query, context=context, selected_files=selected_files, related_tests=related_tests)
+        readiness = self._prepare_readiness(context=context, warnings=warnings)
+        run_id = f"run_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:8]}"
+        run_dir = self.config.index_dir / "runs" / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        context_md_path = run_dir / "context.md"
+        run_json_path = run_dir / "run.json"
+        context_packet = self._render_agent_packet(
+            query=query,
+            target=target,
+            context=context,
+            selected_files=selected_files,
+            related_tests=related_tests,
+            warnings=warnings,
+        )
+        token_stats = {
+            "estimated_raw_tokens": baseline.estimated_tokens,
+            "packet_tokens": context.estimated_tokens,
+            "reduction_percent": round(
+                max(0.0, ((baseline.estimated_tokens - context.estimated_tokens) / max(baseline.estimated_tokens, 1)) * 100),
+                2,
+            ),
+        }
+        run = {
+            "run_id": run_id,
+            "command": "prepare",
+            "task": query,
+            "repo_path": str(self.config.repo_path),
+            "target": target,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "selected_files": selected_files,
+            "selected_symbols": [symbol.name for symbol in context.selected_symbols],
+            "related_tests": related_tests,
+            "excluded_candidates": context.excluded_symbols,
+            "selection_reasons": selection_reasons,
+            "missing_context_warnings": warnings,
+            "risk_warnings": [],
+            "readiness": readiness,
+            "token_stats": token_stats,
+            "context_packet": context_packet,
+            "context": context.model_dump() if view == "full" else None,
+            "output_files": {
+                "context_md": str(context_md_path),
+                "run_json": str(run_json_path),
+            },
+        }
+        context_md_path.write_text(context_packet, encoding="utf-8")
+        run_json_path.write_text(json.dumps(run, indent=2), encoding="utf-8")
+        latest_path = self.config.index_dir / "runs" / "latest.json"
+        latest_path.write_text(json.dumps({"run_id": run_id, "run_json": str(run_json_path)}, indent=2), encoding="utf-8")
+        return run if view == "full" else self._compact_prepare_run(run)
+
+    def replay(self, *, run_id: str | None = None, latest: bool = False, list_runs: bool = False, view: str = "compact") -> dict[str, Any]:
+        runs_dir = self.config.index_dir / "runs"
+        if list_runs:
+            runs = []
+            for run_json in sorted(runs_dir.glob("run_*/run.json"), reverse=True):
+                data = json.loads(run_json.read_text(encoding="utf-8"))
+                runs.append(
+                    {
+                        "run_id": data.get("run_id"),
+                        "task": data.get("task"),
+                        "target": data.get("target"),
+                        "generated_at": data.get("generated_at"),
+                        "readiness": data.get("readiness"),
+                    }
+                )
+            return {"runs": runs}
+        if latest:
+            latest_path = runs_dir / "latest.json"
+            if not latest_path.exists():
+                raise ValueError("Chronicle has no prepared runs yet.")
+            run_path = Path(json.loads(latest_path.read_text(encoding="utf-8"))["run_json"])
+        elif run_id:
+            run_path = runs_dir / run_id / "run.json"
+        else:
+            raise ValueError("Use `--latest`, `--list`, or `--run <run_id>`.")
+        if not run_path.exists():
+            raise ValueError(f"Chronicle could not find prepared run `{run_id or 'latest'}`.")
+        run = json.loads(run_path.read_text(encoding="utf-8"))
+        return run if view == "full" else self._compact_prepare_run(run)
+
+    def explain(self, *, run_id: str | None = None, latest: bool = False, view: str = "compact") -> dict[str, Any]:
+        run = self.replay(run_id=run_id, latest=latest, view="full")
+        explanation = {
+            "run_id": run.get("run_id"),
+            "task": run.get("task"),
+            "readiness": run.get("readiness"),
+            "selection_reasons": run.get("selection_reasons", {}),
+            "warnings": run.get("missing_context_warnings", []),
+            "excluded_candidates": run.get("excluded_candidates", []),
+            "token_stats": run.get("token_stats", {}),
+        }
+        if view == "full":
+            return explanation
+        return {
+            "run_id": explanation["run_id"],
+            "task": explanation["task"],
+            "readiness": explanation["readiness"],
+            "selection_reasons": dict(list(explanation["selection_reasons"].items())[:8]),
+            "warnings": explanation["warnings"],
+        }
+
+    def inspect_file(self, file_path: str, *, view: str = "compact") -> dict[str, Any]:
+        snapshot = self._ensure_snapshot()
+        symbols = [symbol for symbol in snapshot.symbols if symbol.file_path == file_path]
+        imports = sorted({item for symbol in symbols for item in symbol.imports})
+        incoming = sorted(
+            {
+                symbol.file_path
+                for symbol in snapshot.symbols
+                if file_path in snapshot.dependency_graph.get(symbol.file_path, []) and symbol.file_path != file_path
+            }
+        )
+        payload = {
+            "file_path": file_path,
+            "indexed_at": snapshot.indexed_at,
+            "symbols": [
+                {"name": symbol.name, "type": symbol.type, "start_line": symbol.start_line, "end_line": symbol.end_line}
+                for symbol in symbols
+            ],
+            "imports": imports,
+            "outgoing_dependencies": snapshot.dependency_graph.get(file_path, []),
+            "incoming_references": incoming,
+            "related_tests": self._related_tests_for_files(snapshot, [file_path]),
+        }
+        if view == "full":
+            payload["symbol_ids"] = [symbol.id for symbol in symbols]
+        return payload
+
+    def inspect_symbol(self, symbol_name: str, *, view: str = "compact") -> dict[str, Any]:
+        snapshot = self._ensure_snapshot()
+        matches = [symbol for symbol in snapshot.symbols if symbol.name == symbol_name or symbol.name.endswith(f".{symbol_name}")]
+        if not matches:
+            raise ValueError(f"Chronicle could not find symbol `{symbol_name}`.")
+        symbol = matches[0]
+        callers = sorted(source_id for source_id, callees in snapshot.call_graph.items() if symbol.id in callees)
+        payload = {
+            "symbol": {
+                "name": symbol.name,
+                "type": symbol.type,
+                "file_path": symbol.file_path,
+                "start_line": symbol.start_line,
+                "end_line": symbol.end_line,
+                "signature": symbol.signature,
+            },
+            "callers": callers,
+            "callees": snapshot.call_graph.get(symbol.id, []),
+            "related_tests": self._related_tests_for_files(snapshot, [symbol.file_path]),
+            "selection_hints": [
+                f"contains symbol {symbol.name}",
+                f"located in {symbol.file_path}",
+            ],
+        }
+        if view == "full":
+            payload["body"] = symbol.body
+            payload["imports"] = symbol.imports
+        return payload
+
+    def status(self, *, view: str = "compact") -> dict[str, Any]:
+        snapshot = self._load_snapshot()
+        changed_files = self._changed_python_files(include_untracked=True)
+        latest_prepare = self._latest_artifact("runs")
+        latest_review = self._latest_artifact("reviews")
+        latest_handoff = self._latest_artifact("handoffs")
+        indexed = snapshot is not None and bool(snapshot.symbols)
+        stale = bool(changed_files)
+        payload = {
+            "repo": str(self.config.repo_path),
+            "index_dir": str(self.config.index_dir),
+            "indexed": indexed,
+            "index_status": "stale" if indexed and stale else "ready" if indexed else "missing",
+            "indexed_at": snapshot.indexed_at if snapshot else None,
+            "symbol_count": len(snapshot.symbols) if snapshot else 0,
+            "changed_files": changed_files,
+            "latest_prepare": latest_prepare,
+            "latest_review": latest_review,
+            "latest_handoff": latest_handoff,
+            "next_steps": self._status_next_steps(indexed=indexed, changed_files=changed_files, latest_prepare=latest_prepare),
+        }
+        return payload if view == "full" else payload
+
+    def review(
+        self,
+        query: str = "Review recent code changes and impacted tests",
+        *,
+        token_budget: int | None = None,
+        session_id: str | None = None,
+        view: str = "compact",
+    ) -> dict[str, Any]:
+        snapshot = self.index()
+        changed_files = self._changed_python_files(include_untracked=True)
+        changed_symbols = self._symbols_for_files(snapshot, changed_files)
+        related_tests = self._related_tests_for_files(snapshot, changed_files)
+        related_files = self._related_files_for_symbols(snapshot, changed_symbols, changed_files)
+        latest_prepare = self._latest_artifact("runs")
+        warnings = self._review_warnings(
+            changed_files=changed_files,
+            related_tests=related_tests,
+            latest_prepare=latest_prepare,
+        )
+        context = self.context(query=query, token_budget=token_budget, session_id=session_id, remember=False)
+        review_id = f"review_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:8]}"
+        review_dir = self.config.index_dir / "reviews" / review_id
+        review_dir.mkdir(parents=True, exist_ok=True)
+        review_md_path = review_dir / "review.md"
+        review_json_path = review_dir / "review.json"
+        review_md = self._render_review_packet(
+            query=query,
+            changed_files=changed_files,
+            changed_symbols=[symbol.name for symbol in changed_symbols],
+            related_files=related_files,
+            related_tests=related_tests,
+            warnings=warnings,
+            context=context,
+        )
+        payload = {
+            "review_id": review_id,
+            "command": "review",
+            "query": query,
+            "repo_path": str(self.config.repo_path),
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "changed_files": changed_files,
+            "changed_symbols": [symbol.name for symbol in changed_symbols],
+            "related_files": related_files,
+            "related_tests": related_tests,
+            "warnings": warnings,
+            "latest_prepare": latest_prepare,
+            "context": context.model_dump() if view == "full" else None,
+            "review_packet": review_md,
+            "output_files": {
+                "review_md": str(review_md_path),
+                "review_json": str(review_json_path),
+            },
+        }
+        review_md_path.write_text(review_md, encoding="utf-8")
+        review_json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        self._write_latest_artifact("reviews", review_id, review_json_path)
+        return payload if view == "full" else self._compact_review(payload)
+
+    def handoff(
+        self,
+        task: str | None = None,
+        *,
+        tests: str | None = None,
+        notes: list[str] | None = None,
+        view: str = "compact",
+    ) -> dict[str, Any]:
+        status = self.status(view="full")
+        latest_prepare = self._latest_artifact("runs")
+        latest_review = self._latest_artifact("reviews")
+        prepare_payload = self._load_artifact_payload(latest_prepare)
+        review_payload = self._load_artifact_payload(latest_review)
+        resolved_task = task or (prepare_payload or {}).get("task") or "Chronicle handoff"
+        handoff_warnings = self._handoff_warnings(
+            task=resolved_task,
+            status=status,
+            prepare_payload=prepare_payload,
+            review_payload=review_payload,
+            tests=tests,
+        )
+        handoff_id = f"handoff_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:8]}"
+        handoff_dir = self.config.index_dir / "handoffs" / handoff_id
+        handoff_dir.mkdir(parents=True, exist_ok=True)
+        handoff_md_path = handoff_dir / "handoff.md"
+        handoff_json_path = handoff_dir / "handoff.json"
+        handoff_md = self._render_handoff_packet(
+            task=resolved_task,
+            status=status,
+            prepare_payload=prepare_payload,
+            review_payload=review_payload,
+            tests=tests,
+            notes=notes or [],
+            warnings=handoff_warnings,
+        )
+        payload = {
+            "handoff_id": handoff_id,
+            "command": "handoff",
+            "task": resolved_task,
+            "repo_path": str(self.config.repo_path),
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "changed_files": status["changed_files"],
+            "latest_prepare": latest_prepare,
+            "latest_review": latest_review,
+            "tests": tests,
+            "notes": notes or [],
+            "warnings": handoff_warnings,
+            "handoff_packet": handoff_md,
+            "output_files": {
+                "handoff_md": str(handoff_md_path),
+                "handoff_json": str(handoff_json_path),
+            },
+        }
+        handoff_md_path.write_text(handoff_md, encoding="utf-8")
+        handoff_json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        self._write_latest_artifact("handoffs", handoff_id, handoff_json_path)
+        return payload if view == "full" else self._compact_handoff(payload)
+
     def baseline_context(self, query: str, token_budget: int | None = None) -> ContextPack:
         snapshot = self._ensure_snapshot()
         plan = self.query_planner.plan(query)
@@ -542,6 +864,519 @@ class Chronicle:
 
     def _persist_snapshot(self, snapshot: IndexSnapshot) -> None:
         self.snapshot_store.save(snapshot=snapshot, index_dir=self.config.index_dir)
+
+    def _selected_files(self, context: ContextPack) -> list[str]:
+        return list(dict.fromkeys(symbol.file_path for symbol in context.selected_symbols))
+
+    def _related_tests(self, context: ContextPack) -> list[str]:
+        snapshot = self._ensure_snapshot()
+        return self._related_tests_for_files(snapshot, self._selected_files(context))
+
+    def _related_tests_for_files(self, snapshot: IndexSnapshot, files: list[str]) -> list[str]:
+        file_set = set(files)
+        test_files = sorted(
+            {
+                symbol.file_path
+                for symbol in snapshot.symbols
+                if Path(symbol.file_path).name.startswith("test_") or "/tests/" in f"/{symbol.file_path}"
+            }
+        )
+        if not file_set:
+            return test_files[:4]
+        scored: list[tuple[int, str]] = []
+        stems = {Path(file_path).stem.replace("test_", "") for file_path in file_set}
+        changed_symbols = self._symbols_for_files(snapshot, list(file_set))
+        search_terms = self._test_search_terms(files=list(file_set), symbols=changed_symbols)
+        for test_file in test_files:
+            test_stem = Path(test_file).stem.replace("test_", "")
+            score = 0
+            if test_file in file_set:
+                score += 6
+            if test_stem in stems:
+                score += 4
+            if any(stem and stem in test_file for stem in stems):
+                score += 2
+            content = self._read_repo_file(test_file).lower()
+            if content:
+                score += self._score_test_content(content=content, terms=search_terms)
+            if score:
+                scored.append((score, test_file))
+        return [file_path for _, file_path in sorted(scored, key=lambda item: (-item[0], item[1]))[:4]]
+
+    def _test_search_terms(self, *, files: list[str], symbols: list[Any]) -> set[str]:
+        terms: set[str] = set()
+        generic = {"src", "chronicle", "py", "test", "tests", "__init__"}
+        for file_path in files:
+            path = Path(file_path)
+            module = file_path[:-3].replace("/", ".") if file_path.endswith(".py") else file_path.replace("/", ".")
+            terms.add(module.lower())
+            terms.add(path.stem.lower())
+            terms.update(part.lower() for part in path.parts if len(part) > 2)
+        for symbol in symbols:
+            name = symbol.name.lower()
+            terms.add(name)
+            terms.add(name.split(".")[-1])
+            terms.update(part for part in name.replace("_", ".").split(".") if len(part) > 2)
+        return {term for term in terms if len(term) > 2 and term not in generic}
+
+    def _score_test_content(self, *, content: str, terms: set[str]) -> int:
+        score = 0
+        for term in terms:
+            if term not in content:
+                continue
+            if "." in term or "_" in term:
+                score += 3
+            else:
+                score += 1
+        return min(score, 12)
+
+    def _selection_reasons(self, *, context: ContextPack, query: str) -> dict[str, list[str]]:
+        query_terms = {term.lower() for term in query.replace("_", " ").replace(".", " ").split() if len(term) > 2}
+        reasons: dict[str, list[str]] = {}
+        provenance_by_file: dict[str, list[str]] = {}
+        for record in context.provenance:
+            provenance_by_file.setdefault(record.file_path, []).append(record.reason)
+        for symbol in context.selected_symbols:
+            file_reasons = reasons.setdefault(symbol.file_path, [])
+            symbol_text = f"{symbol.name} {symbol.file_path}".lower().replace("_", " ").replace(".", " ")
+            matched_terms = sorted(term for term in query_terms if term in symbol_text)
+            if matched_terms:
+                file_reasons.append(f"matches task concepts: {', '.join(matched_terms[:4])}")
+            file_reasons.append(f"contains symbol {symbol.name}")
+            for reason in provenance_by_file.get(symbol.file_path, [])[:2]:
+                file_reasons.append(reason)
+        return {file_path: list(dict.fromkeys(file_reasons))[:5] for file_path, file_reasons in reasons.items()}
+
+    def _missing_context_warnings(
+        self,
+        *,
+        query: str,
+        context: ContextPack,
+        selected_files: list[str],
+        related_tests: list[str],
+    ) -> list[str]:
+        warnings: list[str] = []
+        lowered = query.lower()
+        if not related_tests:
+            warnings.append("No related test file found.")
+        if "config" in lowered and not any("config" in file_path or "settings" in file_path for file_path in selected_files):
+            warnings.append("Query mentions config/settings, but no config file was selected.")
+        if "retry" in lowered and not any("retry" in symbol.name.lower() for symbol in context.selected_symbols):
+            warnings.append("Query mentions retry, but no retry-related symbol was found.")
+        if context.estimated_tokens >= context.token_budget:
+            warnings.append("Token budget is tight; some lower-ranked context may have been compressed or excluded.")
+        if len(selected_files) == 1 and len(context.selected_symbols) > 3:
+            warnings.append("Selected context is dominated by one file; coverage may be narrow.")
+        return warnings
+
+    def _prepare_readiness(self, *, context: ContextPack, warnings: list[str]) -> dict[str, str]:
+        if context.confidence >= 0.75 and not warnings:
+            return {"level": "high", "reason": "Relevant symbols were found with no deterministic warnings."}
+        if context.confidence >= 0.45:
+            reason = "Relevant files or symbols were found"
+            if warnings:
+                reason += f", with {len(warnings)} warning(s)."
+            else:
+                reason += "."
+            return {"level": "medium", "reason": reason}
+        return {"level": "low", "reason": "Chronicle found weak matching evidence for this task."}
+
+    def _render_agent_packet(
+        self,
+        *,
+        query: str,
+        target: str,
+        context: ContextPack,
+        selected_files: list[str],
+        related_tests: list[str],
+        warnings: list[str],
+    ) -> str:
+        lines = [
+            "# Chronicle Context Packet",
+            "",
+            "## Task",
+            query,
+            "",
+            "## Instructions for the Coding Agent",
+            "Use this as the primary repo context.",
+            "Prefer modifying selected files unless investigation proves another file is required.",
+            "Pay attention to warnings and related tests.",
+            f"Target agent: {target}",
+            "",
+            "## Primary Context",
+        ]
+        primary_symbols = self._packet_primary_symbols(query=query, context=context)
+        supporting_symbols = [symbol for symbol in context.selected_symbols if symbol.name not in {item.name for item in primary_symbols}]
+        lines.extend(
+            [f"- {symbol.name} ({symbol.file_path}:{symbol.start_line})" for symbol in primary_symbols[:6]]
+            or ["- none"]
+        )
+        lines.extend(["", "## Supporting Context"])
+        lines.extend(
+            [f"- {symbol.name} ({symbol.file_path}:{symbol.start_line})" for symbol in supporting_symbols[:8]]
+            or ["- none"]
+        )
+        lines.extend(["", "## Verification Context"])
+        lines.extend([f"- {file_path}" for file_path in related_tests] or ["- none found"])
+        lines.extend(["", "## Selected Files"])
+        lines.extend(f"- {file_path}" for file_path in selected_files)
+        lines.extend(["", "## Functional Call Chain"])
+        call_chain_warning = self._packet_call_chain_warning(query=query, context=context)
+        if context.call_chain and context.call_chain.summary:
+            lines.append(context.call_chain.summary)
+        else:
+            lines.append("- none")
+        if call_chain_warning:
+            lines.extend(["", "## Call Chain Warning", f"- {call_chain_warning}"])
+        if context.patch_context and context.patch_context.summary:
+            lines.extend(["", "## Dependency And Patch Hints", context.patch_context.summary])
+        lines.extend(
+            [
+                "",
+                "## Key Symbols",
+            ]
+        )
+        lines.extend(f"- {symbol.name} ({symbol.file_path}:{symbol.start_line})" for symbol in context.selected_symbols[:12])
+        lines.extend(["", "## Related Tests"])
+        lines.extend([f"- {file_path}" for file_path in related_tests] or ["- none found"])
+        lines.extend(["", "## Warnings"])
+        lines.extend([f"- {warning}" for warning in warnings] or ["- none"])
+        lines.extend(["", "## Context", context.compressed_context.strip()])
+        return "\n".join(lines).strip() + "\n"
+
+    def _packet_primary_symbols(self, *, query: str, context: ContextPack) -> list[Any]:
+        if not context.selected_symbols:
+            return []
+        primary: list[Any] = []
+        if context.call_chain and context.call_chain.entry_symbol:
+            for symbol in context.selected_symbols:
+                if symbol.name == context.call_chain.entry_symbol:
+                    primary.append(symbol)
+                    break
+        terms = self._packet_task_terms(query)
+        for symbol in context.selected_symbols:
+            if symbol in primary:
+                continue
+            haystack = self._packet_normalize(f"{symbol.name} {symbol.file_path}")
+            if any(term in haystack for term in terms):
+                primary.append(symbol)
+            if len(primary) >= 4:
+                break
+        if not primary:
+            primary.append(context.selected_symbols[0])
+        return primary
+
+    def _packet_call_chain_warning(self, *, query: str, context: ContextPack) -> str:
+        if not (context.call_chain and context.call_chain.entry_symbol):
+            return ""
+        terms = self._packet_task_terms(query)
+        if not terms:
+            return ""
+        entry = self._packet_normalize(context.call_chain.entry_symbol)
+        if any(term in entry for term in terms):
+            return ""
+        strongest = sorted(terms, key=len, reverse=True)[0]
+        return (
+            f"Call chain starts at {context.call_chain.entry_symbol}, which does not directly match "
+            f"task keyword `{strongest}`. Verify the flow before relying on it."
+        )
+
+    def _packet_task_terms(self, query: str) -> set[str]:
+        stopwords = {
+            "change",
+            "changes",
+            "done",
+            "fine",
+            "review",
+            "current",
+            "recent",
+            "code",
+            "flow",
+            "call",
+            "chain",
+            "packet",
+        }
+        terms = {
+            self._packet_normalize(token)
+            for token in query.replace("_", " ").replace(".", " ").split()
+            if len(token) > 2 and token.lower() not in stopwords
+        }
+        return {term for term in terms if len(term) > 2}
+
+    def _packet_normalize(self, text: str) -> str:
+        return "".join(character.lower() for character in text if character.isalnum())
+
+    def _compact_prepare_run(self, run: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "run_id": run.get("run_id"),
+            "task": run.get("task"),
+            "target": run.get("target"),
+            "selected_files": run.get("selected_files", []),
+            "selected_symbols": run.get("selected_symbols", [])[:12],
+            "related_tests": run.get("related_tests", []),
+            "warnings": run.get("missing_context_warnings", []),
+            "readiness": run.get("readiness"),
+            "saved": run.get("output_files", {}),
+        }
+
+    def _compact_review(self, review: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "review_id": review.get("review_id"),
+            "query": review.get("query"),
+            "changed_files": review.get("changed_files", []),
+            "changed_symbols": review.get("changed_symbols", [])[:12],
+            "related_files": review.get("related_files", [])[:8],
+            "related_tests": review.get("related_tests", []),
+            "warnings": review.get("warnings", []),
+            "saved": review.get("output_files", {}),
+        }
+
+    def _compact_handoff(self, handoff: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "handoff_id": handoff.get("handoff_id"),
+            "task": handoff.get("task"),
+            "changed_files": handoff.get("changed_files", []),
+            "latest_prepare": handoff.get("latest_prepare"),
+            "latest_review": handoff.get("latest_review"),
+            "tests": handoff.get("tests"),
+            "notes": handoff.get("notes", []),
+            "warnings": handoff.get("warnings", []),
+            "saved": handoff.get("output_files", {}),
+        }
+
+    def _status_next_steps(
+        self,
+        *,
+        indexed: bool,
+        changed_files: list[str],
+        latest_prepare: dict[str, Any] | None,
+    ) -> list[str]:
+        if not indexed:
+            return ["Run `chronicle prepare \"<task>\" --repo <repo>` to index and prepare context."]
+        if changed_files:
+            return ["Run tests, then `chronicle review --repo <repo>` to prepare a review packet."]
+        if latest_prepare:
+            return ["Run `chronicle replay --latest --repo <repo>` to reuse the latest prepared packet."]
+        return ["Run `chronicle prepare \"<task>\" --repo <repo>` before asking a coding agent to edit."]
+
+    def _symbols_for_files(self, snapshot: IndexSnapshot, files: list[str]) -> list[Any]:
+        file_set = set(files)
+        return [symbol for symbol in snapshot.symbols if symbol.file_path in file_set]
+
+    def _related_files_for_symbols(
+        self,
+        snapshot: IndexSnapshot,
+        symbols: list[Any],
+        changed_files: list[str],
+    ) -> list[str]:
+        changed_set = set(changed_files)
+        symbol_index = {symbol.id: symbol for symbol in snapshot.symbols}
+        related: list[str] = []
+        for symbol in symbols:
+            for callee_id in snapshot.call_graph.get(symbol.id, []):
+                callee = symbol_index.get(callee_id)
+                if callee and callee.file_path not in changed_set and callee.file_path not in related:
+                    related.append(callee.file_path)
+            for caller_id, callees in snapshot.call_graph.items():
+                if symbol.id not in callees:
+                    continue
+                caller = symbol_index.get(caller_id)
+                if caller and caller.file_path not in changed_set and caller.file_path not in related:
+                    related.append(caller.file_path)
+        for file_path in changed_files:
+            for imported in snapshot.dependency_graph.get(file_path, []):
+                maybe_file = imported.replace(".", "/") + ".py"
+                if maybe_file not in changed_set and maybe_file not in related:
+                    related.append(maybe_file)
+        return related[:8]
+
+    def _review_warnings(
+        self,
+        *,
+        changed_files: list[str],
+        related_tests: list[str],
+        latest_prepare: dict[str, Any] | None,
+    ) -> list[str]:
+        warnings: list[str] = []
+        if not changed_files:
+            warnings.append("No changed Python files detected.")
+        if changed_files and not related_tests:
+            warnings.append("No related tests found for the changed files.")
+        if changed_files and not any("test" in file_path.lower() for file_path in changed_files):
+            warnings.append("No test files changed.")
+        if latest_prepare:
+            prepared_files = set(latest_prepare.get("selected_files", []))
+            outside = [file_path for file_path in changed_files if file_path not in prepared_files]
+            if outside:
+                warnings.append(
+                    "Changed files outside the latest prepared packet: " + ", ".join(outside[:6])
+                )
+        else:
+            warnings.append("No prior prepare run found; review cannot compare against original packet scope.")
+        return warnings
+
+    def _handoff_warnings(
+        self,
+        *,
+        task: str,
+        status: dict[str, Any],
+        prepare_payload: dict[str, Any] | None,
+        review_payload: dict[str, Any] | None,
+        tests: str | None,
+    ) -> list[str]:
+        warnings: list[str] = []
+        changed_files = set(status.get("changed_files", []))
+        if not tests:
+            warnings.append("Tests were not recorded for this handoff.")
+        if prepare_payload is None:
+            warnings.append("No prepare packet is available for this handoff.")
+        else:
+            prepared_task = str(prepare_payload.get("task") or "")
+            if prepared_task and task and prepared_task.lower() != task.lower():
+                warnings.append(f"Handoff task differs from latest prepare task: {prepared_task}")
+            prepared_files = set(prepare_payload.get("selected_files", []))
+            missing_prepare_files = sorted(changed_files.difference(prepared_files))
+            if missing_prepare_files:
+                warnings.append(
+                    "Changed files outside latest prepare packet: " + ", ".join(missing_prepare_files[:8])
+                )
+        if review_payload is None:
+            warnings.append("No review packet is available for this handoff.")
+        else:
+            reviewed_files = set(review_payload.get("changed_files", []))
+            missing_review_files = sorted(changed_files.difference(reviewed_files))
+            if missing_review_files:
+                warnings.append(
+                    "Latest review does not cover changed files: " + ", ".join(missing_review_files[:8])
+                )
+            if not review_payload.get("related_tests"):
+                warnings.append("Latest review has no related tests.")
+        return warnings
+
+    def _render_review_packet(
+        self,
+        *,
+        query: str,
+        changed_files: list[str],
+        changed_symbols: list[str],
+        related_files: list[str],
+        related_tests: list[str],
+        warnings: list[str],
+        context: ContextPack,
+    ) -> str:
+        lines = [
+            "# Chronicle Review Packet",
+            "",
+            "## Review Goal",
+            query,
+            "",
+            "## Changed Files",
+        ]
+        lines.extend([f"- {file_path}" for file_path in changed_files] or ["- none detected"])
+        lines.extend(["", "## Changed Symbols"])
+        lines.extend([f"- {symbol}" for symbol in changed_symbols[:12]] or ["- none detected"])
+        lines.extend(["", "## Related Files To Inspect"])
+        lines.extend([f"- {file_path}" for file_path in related_files] or ["- none found"])
+        lines.extend(["", "## Related Tests"])
+        lines.extend([f"- {file_path}" for file_path in related_tests] or ["- none found"])
+        lines.extend(["", "## Warnings"])
+        lines.extend([f"- {warning}" for warning in warnings] or ["- none"])
+        lines.extend(["", "## Grounded Context", context.compressed_context.strip()])
+        return "\n".join(lines).strip() + "\n"
+
+    def _render_handoff_packet(
+        self,
+        *,
+        task: str,
+        status: dict[str, Any],
+        prepare_payload: dict[str, Any] | None,
+        review_payload: dict[str, Any] | None,
+        tests: str | None,
+        notes: list[str],
+        warnings: list[str],
+    ) -> str:
+        lines = [
+            "# Chronicle Handoff",
+            "",
+            "## Task",
+            task,
+            "",
+            "## Repo Status",
+            f"- Index status: {status.get('index_status')}",
+            f"- Changed files: {', '.join(status.get('changed_files', [])) or 'none'}",
+            "",
+            "## Prepared Context",
+        ]
+        if prepare_payload:
+            lines.extend(
+                [
+                    f"- Run: {prepare_payload.get('run_id')}",
+                    f"- Files: {', '.join(prepare_payload.get('selected_files', [])[:8]) or 'none'}",
+                    f"- Warnings: {', '.join(prepare_payload.get('missing_context_warnings', [])) or 'none'}",
+                ]
+            )
+        else:
+            lines.append("- none")
+        lines.extend(["", "## Review Context"])
+        if review_payload:
+            lines.extend(
+                [
+                    f"- Review: {review_payload.get('review_id')}",
+                    f"- Changed files: {', '.join(review_payload.get('changed_files', [])[:8]) or 'none'}",
+                    f"- Related tests: {', '.join(review_payload.get('related_tests', [])) or 'none'}",
+                    f"- Warnings: {', '.join(review_payload.get('warnings', [])) or 'none'}",
+                ]
+            )
+        else:
+            lines.append("- none")
+        lines.extend(["", "## Handoff Warnings"])
+        lines.extend([f"- {warning}" for warning in warnings] or ["- none"])
+        lines.extend(["", "## Tests"])
+        lines.append(tests or "Not recorded.")
+        lines.extend(["", "## Notes"])
+        lines.extend([f"- {note}" for note in notes] or ["- none"])
+        return "\n".join(lines).strip() + "\n"
+
+    def _latest_artifact(self, folder: str) -> dict[str, Any] | None:
+        latest_path = self.config.index_dir / folder / "latest.json"
+        if not latest_path.exists():
+            return None
+        try:
+            pointer = json.loads(latest_path.read_text(encoding="utf-8"))
+            payload = self._load_artifact_payload(pointer)
+        except (OSError, json.JSONDecodeError, KeyError):
+            return None
+        if payload is None:
+            return None
+        return {
+            **pointer,
+            "task": payload.get("task") or payload.get("query"),
+            "generated_at": payload.get("generated_at"),
+            "selected_files": payload.get("selected_files", []),
+            "changed_files": payload.get("changed_files", []),
+        }
+
+    def _write_latest_artifact(self, folder: str, artifact_id: str, json_path: Path) -> None:
+        latest_path = self.config.index_dir / folder / "latest.json"
+        latest_path.parent.mkdir(parents=True, exist_ok=True)
+        latest_path.write_text(
+            json.dumps({"id": artifact_id, "json": str(json_path)}, indent=2),
+            encoding="utf-8",
+        )
+
+    def _load_artifact_payload(self, pointer: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not pointer:
+            return None
+        path_value = pointer.get("json") or pointer.get("run_json") or pointer.get("review_json") or pointer.get("handoff_json")
+        if not path_value:
+            return None
+        path = Path(path_value)
+        if not path.exists():
+            return None
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
 
     def _load_snapshot(self) -> IndexSnapshot | None:
         return self.snapshot_store.load(index_dir=self.config.index_dir)
@@ -1367,8 +2202,11 @@ class Chronicle:
         return f"bus-{uuid4().hex[:12]}"
 
     def _has_uncommitted_python_changes(self) -> bool:
+        return bool(self._changed_python_files(include_untracked=False))
+
+    def _changed_python_files(self, *, include_untracked: bool) -> list[str]:
         if not (self.config.repo_path / ".git").exists():
-            return False
+            return []
         result = subprocess.run(
             ["git", "diff", "--name-only", "--", "*.py"],
             cwd=self.config.repo_path,
@@ -1377,5 +2215,25 @@ class Chronicle:
             check=False,
         )
         if result.returncode != 0:
-            return False
-        return any(line.strip().endswith(".py") for line in result.stdout.splitlines())
+            return []
+        files = [line.strip() for line in result.stdout.splitlines() if line.strip().endswith(".py")]
+        staged = subprocess.run(
+            ["git", "diff", "--cached", "--name-only", "--", "*.py"],
+            cwd=self.config.repo_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if staged.returncode == 0:
+            files.extend(line.strip() for line in staged.stdout.splitlines() if line.strip().endswith(".py"))
+        if include_untracked:
+            untracked = subprocess.run(
+                ["git", "ls-files", "--others", "--exclude-standard", "--", "*.py"],
+                cwd=self.config.repo_path,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if untracked.returncode == 0:
+                files.extend(line.strip() for line in untracked.stdout.splitlines() if line.strip().endswith(".py"))
+        return list(dict.fromkeys(files))

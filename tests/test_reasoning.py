@@ -836,6 +836,243 @@ class ReasoningTests(unittest.TestCase):
             self.assertIn("selected_symbols", packet)
             self.assertEqual(stored["session_id"], "demo-session")
 
+    def test_prepare_replay_explain_inspect_and_mcp_prepare_flow(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "src" / "auth"
+            tests = root / "tests"
+            src.mkdir(parents=True)
+            tests.mkdir()
+            (src / "service.py").write_text(
+                "class AuthService:\n"
+                "    def refresh_token(self, token):\n"
+                "        return token\n",
+                encoding="utf-8",
+            )
+            (tests / "test_service.py").write_text(
+                "from src.auth.service import AuthService\n\n"
+                "def test_refresh_token():\n"
+                "    assert AuthService().refresh_token('t') == 't'\n",
+                encoding="utf-8",
+            )
+
+            chronicle = Chronicle(repo_path=root)
+            prepared = chronicle.prepare("Fix auth token refresh bug", target="codex")
+            replayed = chronicle.replay(latest=True)
+            explained = chronicle.explain(latest=True)
+            inspected_file = chronicle.inspect_file("src/auth/service.py")
+            inspected_symbol = chronicle.inspect_symbol("AuthService.refresh_token")
+            mcp_prepared = ChronicleMCPServer(repo_path=root).handle(
+                "prepare",
+                {"query": "Fix auth token refresh bug", "target": "codex"},
+            )
+
+            self.assertTrue((root / "chronicle_logs" / "runs").exists())
+            self.assertEqual(prepared["run_id"], replayed["run_id"])
+            self.assertIn("src/auth/service.py", prepared["selected_files"])
+            self.assertIn("selection_reasons", explained)
+            self.assertEqual(inspected_file["file_path"], "src/auth/service.py")
+            self.assertEqual(inspected_symbol["symbol"]["name"], "AuthService.refresh_token")
+            self.assertIn("saved", mcp_prepared)
+
+    def test_status_review_handoff_and_mcp_flow(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "src" / "auth"
+            tests = root / "tests"
+            src.mkdir(parents=True)
+            tests.mkdir()
+            (src / "service.py").write_text(
+                "class AuthService:\n"
+                "    def refresh_token(self, token):\n"
+                "        return token\n",
+                encoding="utf-8",
+            )
+            (tests / "test_service.py").write_text(
+                "from src.auth.service import AuthService\n\n"
+                "def test_refresh_token():\n"
+                "    assert AuthService().refresh_token('t') == 't'\n",
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "init"], cwd=root, check=True, capture_output=True, text=True)
+            subprocess.run(["git", "config", "user.email", "chronicle@example.com"], cwd=root, check=True, capture_output=True, text=True)
+            subprocess.run(["git", "config", "user.name", "Chronicle"], cwd=root, check=True, capture_output=True, text=True)
+            subprocess.run(["git", "add", "."], cwd=root, check=True, capture_output=True, text=True)
+            subprocess.run(["git", "commit", "-m", "initial"], cwd=root, check=True, capture_output=True, text=True)
+
+            chronicle = Chronicle(repo_path=root)
+            prepared = chronicle.prepare("Fix auth token refresh bug")
+            (src / "service.py").write_text(
+                "class AuthService:\n"
+                "    def refresh_token(self, token):\n"
+                "        if not token:\n"
+                "            return 'missing'\n"
+                "        return token\n",
+                encoding="utf-8",
+            )
+
+            status = chronicle.status()
+            review = chronicle.review()
+            handoff = chronicle.handoff(tests="pytest tests/test_service.py passed", notes=["Ready for reviewer."])
+            server = ChronicleMCPServer(repo_path=root)
+            mcp_status = server.handle("status", {})
+            mcp_review = server.handle("review", {})
+            mcp_handoff = server.handle("handoff", {"tests": "pytest passed"})
+
+            self.assertEqual(prepared["task"], "Fix auth token refresh bug")
+            self.assertIn("src/auth/service.py", status["changed_files"])
+            self.assertIn("src/auth/service.py", review["changed_files"])
+            self.assertIn("tests/test_service.py", review["related_tests"])
+            self.assertIn("handoff_md", handoff["saved"])
+            self.assertIn("src/auth/service.py", mcp_status["changed_files"])
+            self.assertIn("review_md", mcp_review["saved"])
+            self.assertIn("handoff_md", mcp_handoff["saved"])
+
+    def test_review_finds_integration_tests_by_content_not_only_filename(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            package = root / "src" / "chronicle"
+            tests = root / "tests"
+            package.mkdir(parents=True)
+            tests.mkdir()
+            (package / "__init__.py").write_text("", encoding="utf-8")
+            (package / "api.py").write_text(
+                "class Chronicle:\n"
+                "    def prepare(self):\n"
+                "        return 'prepare'\n"
+                "    def review(self):\n"
+                "        return 'review'\n",
+                encoding="utf-8",
+            )
+            (package / "cli.py").write_text(
+                "def main():\n"
+                "    return 'cli prepare review handoff'\n",
+                encoding="utf-8",
+            )
+            (package / "integrations.py").write_text(
+                "class ChronicleMCPServer:\n"
+                "    def handle(self):\n"
+                "        return 'status review handoff'\n",
+                encoding="utf-8",
+            )
+            (tests / "test_reasoning.py").write_text(
+                "from chronicle.api import Chronicle\n"
+                "from chronicle import cli as chronicle_cli\n"
+                "from chronicle.integrations import ChronicleMCPServer\n\n"
+                "def test_prepare_replay_explain_inspect_and_mcp_prepare_flow():\n"
+                "    assert Chronicle().prepare()\n\n"
+                "def test_status_review_handoff_and_mcp_flow():\n"
+                "    assert ChronicleMCPServer().handle()\n",
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "init"], cwd=root, check=True, capture_output=True, text=True)
+            subprocess.run(["git", "config", "user.email", "chronicle@example.com"], cwd=root, check=True, capture_output=True, text=True)
+            subprocess.run(["git", "config", "user.name", "Chronicle"], cwd=root, check=True, capture_output=True, text=True)
+            subprocess.run(["git", "add", "."], cwd=root, check=True, capture_output=True, text=True)
+            subprocess.run(["git", "commit", "-m", "initial"], cwd=root, check=True, capture_output=True, text=True)
+
+            (package / "api.py").write_text(
+                "class Chronicle:\n"
+                "    def prepare(self):\n"
+                "        return 'prepare packet'\n"
+                "    def review(self):\n"
+                "        return 'review packet'\n"
+                "    def handoff(self):\n"
+                "        return 'handoff packet'\n",
+                encoding="utf-8",
+            )
+
+            review = Chronicle(repo_path=root).review()
+
+            self.assertIn("src/chronicle/api.py", review["changed_files"])
+            self.assertIn("tests/test_reasoning.py", review["related_tests"])
+
+    def test_handoff_task_anchors_call_chain_on_handoff_symbol(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            package = root / "src" / "chronicle"
+            package.mkdir(parents=True)
+            (package / "__init__.py").write_text("", encoding="utf-8")
+            (package / "api.py").write_text(
+                "class Chronicle:\n"
+                "    def review(self):\n"
+                "        self.index()\n"
+                "        self._render_review_packet()\n"
+                "    def handoff(self):\n"
+                "        status = self.status()\n"
+                "        payload = self._load_artifact_payload()\n"
+                "        self._render_handoff_packet()\n"
+                "        self._write_latest_artifact()\n"
+                "        return status, payload\n"
+                "    def status(self):\n"
+                "        return 'status'\n"
+                "    def index(self):\n"
+                "        return 'index'\n"
+                "    def _load_artifact_payload(self):\n"
+                "        return {}\n"
+                "    def _render_review_packet(self):\n"
+                "        return 'review'\n"
+                "    def _render_handoff_packet(self):\n"
+                "        return 'handoff'\n"
+                "    def _write_latest_artifact(self):\n"
+                "        return 'latest'\n",
+                encoding="utf-8",
+            )
+
+            context = Chronicle(repo_path=root).context(
+                "is the handoff logic well drafted?",
+                token_budget=1800,
+            )
+
+            self.assertIsNotNone(context.call_chain)
+            assert context.call_chain is not None
+            self.assertEqual(context.call_chain.entry_symbol, "Chronicle.handoff")
+            self.assertIn("Chronicle.handoff", context.call_chain.summary)
+            self.assertIn("Direct calls from Chronicle.handoff", context.call_chain.summary)
+            self.assertIn("Chronicle._render_handoff_packet", context.call_chain.summary)
+            self.assertIn("Primary context:", context.compressed_context)
+            self.assertIn("Supporting context:", context.compressed_context)
+            self.assertIn("Verification context:", context.compressed_context)
+
+    def test_handoff_warns_when_review_is_stale_or_tests_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "src"
+            src.mkdir()
+            (src / "feature.py").write_text(
+                "def prepare_flow():\n"
+                "    return 'prepare'\n",
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "init"], cwd=root, check=True, capture_output=True, text=True)
+            subprocess.run(["git", "config", "user.email", "chronicle@example.com"], cwd=root, check=True, capture_output=True, text=True)
+            subprocess.run(["git", "config", "user.name", "Chronicle"], cwd=root, check=True, capture_output=True, text=True)
+            subprocess.run(["git", "add", "."], cwd=root, check=True, capture_output=True, text=True)
+            subprocess.run(["git", "commit", "-m", "initial"], cwd=root, check=True, capture_output=True, text=True)
+
+            chronicle = Chronicle(repo_path=root)
+            chronicle.prepare("Prepare flow")
+            (src / "feature.py").write_text(
+                "def prepare_flow():\n"
+                "    return 'prepare'\n\n"
+                "def review_flow():\n"
+                "    return 'review'\n",
+                encoding="utf-8",
+            )
+            chronicle.review("Review feature changes")
+            (src / "extra.py").write_text(
+                "def handoff_flow():\n"
+                "    return 'handoff'\n",
+                encoding="utf-8",
+            )
+
+            handoff = chronicle.handoff("Different handoff task")
+
+            self.assertIn("Tests were not recorded", " ".join(handoff["warnings"]))
+            self.assertIn("Latest review does not cover changed files", " ".join(handoff["warnings"]))
+            self.assertIn("Handoff task differs", " ".join(handoff["warnings"]))
+            self.assertIn("## Handoff Warnings", (root / "chronicle_logs" / "handoffs" / handoff["handoff_id"] / "handoff.md").read_text(encoding="utf-8"))
+
     def test_mcp_stdio_server_supports_initialize_and_tools(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
