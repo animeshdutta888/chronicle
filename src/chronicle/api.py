@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+import shutil
 import subprocess
 from typing import Any
 from uuid import uuid4
@@ -442,9 +443,10 @@ class Chronicle:
         run_id = f"run_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:8]}"
         run_dir = self.config.index_dir / "runs" / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
-        context_md_path = run_dir / "context.md"
-        run_json_path = run_dir / "run.json"
+        prepare_md_path = run_dir / "prepare.md"
+        prepare_json_path = run_dir / "prepare.json"
         context_packet = self._render_agent_packet(
+            run_id=run_id,
             query=query,
             target=target,
             context=context,
@@ -479,22 +481,22 @@ class Chronicle:
             "context_packet": context_packet,
             "context": context.model_dump() if view == "full" else None,
             "output_files": {
-                "context_md": str(context_md_path),
-                "run_json": str(run_json_path),
+                "prepare_md": str(prepare_md_path),
+                "prepare_json": str(prepare_json_path),
             },
         }
-        context_md_path.write_text(context_packet, encoding="utf-8")
-        run_json_path.write_text(json.dumps(run, indent=2), encoding="utf-8")
+        prepare_md_path.write_text(context_packet, encoding="utf-8")
+        prepare_json_path.write_text(json.dumps(run, indent=2), encoding="utf-8")
         latest_path = self.config.index_dir / "runs" / "latest.json"
-        latest_path.write_text(json.dumps({"run_id": run_id, "run_json": str(run_json_path)}, indent=2), encoding="utf-8")
+        latest_path.write_text(json.dumps({"run_id": run_id, "prepare_json": str(prepare_json_path)}, indent=2), encoding="utf-8")
         return run if view == "full" else self._compact_prepare_run(run)
 
     def replay(self, *, run_id: str | None = None, latest: bool = False, list_runs: bool = False, view: str = "compact") -> dict[str, Any]:
         runs_dir = self.config.index_dir / "runs"
         if list_runs:
             runs = []
-            for run_json in sorted(runs_dir.glob("run_*/run.json"), reverse=True):
-                data = json.loads(run_json.read_text(encoding="utf-8"))
+            for prepare_json in sorted(runs_dir.glob("run_*/prepare.json"), reverse=True):
+                data = json.loads(prepare_json.read_text(encoding="utf-8"))
                 runs.append(
                     {
                         "run_id": data.get("run_id"),
@@ -509,9 +511,10 @@ class Chronicle:
             latest_path = runs_dir / "latest.json"
             if not latest_path.exists():
                 raise ValueError("Chronicle has no prepared runs yet.")
-            run_path = Path(json.loads(latest_path.read_text(encoding="utf-8"))["run_json"])
+            pointer = json.loads(latest_path.read_text(encoding="utf-8"))
+            run_path = Path(pointer.get("prepare_json") or pointer.get("run_json"))
         elif run_id:
-            run_path = runs_dir / run_id / "run.json"
+            run_path = runs_dir / run_id / "prepare.json"
         else:
             raise ValueError("Use `--latest`, `--list`, or `--run <run_id>`.")
         if not run_path.exists():
@@ -639,12 +642,15 @@ class Chronicle:
             latest_prepare=latest_prepare,
         )
         context = self.context(query=query, token_budget=token_budget, session_id=session_id, remember=False)
-        review_id = f"review_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:8]}"
-        review_dir = self.config.index_dir / "reviews" / review_id
+        run_id = (latest_prepare or {}).get("run_id")
+        review_id = run_id or f"run_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:8]}"
+        review_dir = self.config.index_dir / "runs" / review_id
         review_dir.mkdir(parents=True, exist_ok=True)
         review_md_path = review_dir / "review.md"
         review_json_path = review_dir / "review.json"
+        risk_level = self._risk_level(changed_files=changed_files, warnings=warnings)
         review_md = self._render_review_packet(
+            run_id=review_id,
             query=query,
             changed_files=changed_files,
             changed_symbols=[symbol.name for symbol in changed_symbols],
@@ -652,13 +658,16 @@ class Chronicle:
             related_tests=related_tests,
             warnings=warnings,
             context=context,
+            risk_level=risk_level,
         )
         payload = {
             "review_id": review_id,
+            "run_id": review_id,
             "command": "review",
             "query": query,
             "repo_path": str(self.config.repo_path),
             "generated_at": datetime.now(timezone.utc).isoformat(),
+            "risk_level": risk_level,
             "changed_files": changed_files,
             "changed_symbols": [symbol.name for symbol in changed_symbols],
             "related_files": related_files,
@@ -698,12 +707,14 @@ class Chronicle:
             review_payload=review_payload,
             tests=tests,
         )
-        handoff_id = f"handoff_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:8]}"
-        handoff_dir = self.config.index_dir / "handoffs" / handoff_id
+        run_id = (latest_prepare or latest_review or {}).get("run_id") or (latest_prepare or latest_review or {}).get("id")
+        handoff_id = run_id or f"run_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:8]}"
+        handoff_dir = self.config.index_dir / "runs" / handoff_id
         handoff_dir.mkdir(parents=True, exist_ok=True)
         handoff_md_path = handoff_dir / "handoff.md"
         handoff_json_path = handoff_dir / "handoff.json"
         handoff_md = self._render_handoff_packet(
+            run_id=handoff_id,
             task=resolved_task,
             status=status,
             prepare_payload=prepare_payload,
@@ -714,6 +725,7 @@ class Chronicle:
         )
         payload = {
             "handoff_id": handoff_id,
+            "run_id": handoff_id,
             "command": "handoff",
             "task": resolved_task,
             "repo_path": str(self.config.repo_path),
@@ -734,6 +746,80 @@ class Chronicle:
         handoff_json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         self._write_latest_artifact("handoffs", handoff_id, handoff_json_path)
         return payload if view == "full" else self._compact_handoff(payload)
+
+    def setup_agent(
+        self,
+        agent: str,
+        *,
+        configure_mcp: bool = True,
+        instructions: bool = True,
+    ) -> dict[str, Any]:
+        supported = {"codex", "claude", "cursor", "all"}
+        if agent not in supported:
+            raise ValueError("Use one of: codex, claude, cursor, all.")
+        if not configure_mcp and not instructions:
+            raise ValueError("Use at least one setup mode; `--no-mcp` and `--mcp-only` cannot both be active.")
+        agents = ["codex", "claude", "cursor"] if agent == "all" else [agent]
+        updated = []
+        mcp_results = []
+        for item in agents:
+            if instructions:
+                if item == "codex":
+                    updated.append(self._append_agent_setup("AGENTS.md", self._agent_setup_section("Codex")))
+                elif item == "claude":
+                    updated.append(self._append_agent_setup("CLAUDE.md", self._agent_setup_section("Claude")))
+                elif item == "cursor":
+                    path = self.config.repo_path / ".cursor" / "rules" / "chronicle.mdc"
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    existed = path.exists()
+                    path.write_text(self._cursor_setup_section(), encoding="utf-8")
+                    updated.append({"agent": "cursor", "path": str(path), "action": "updated" if existed else "created"})
+            if configure_mcp:
+                mcp_results.append(self._setup_agent_mcp(item))
+        return {"repo": str(self.config.repo_path), "updated": updated, "configured": mcp_results}
+
+    def pr_review(self, *, base: str = "main", output: str | None = None) -> dict[str, Any]:
+        if not (self.config.repo_path / ".git").exists():
+            raise ValueError("Chronicle PR review requires a local git repository.")
+        changed_files = self._git_changed_files(base=base)
+        snapshot = self.index() if changed_files else self._load_snapshot()
+        changed_symbols = self._symbols_for_files(snapshot, changed_files) if snapshot else []
+        related_tests = self._related_tests_for_files(snapshot, changed_files) if snapshot else []
+        warnings = []
+        if not changed_files:
+            warnings.append(f"No changed files detected against `{base}`.")
+        if changed_files and not related_tests:
+            warnings.append("No related tests found for the changed files.")
+        risk_level = self._risk_level(changed_files=changed_files, warnings=warnings)
+        run_id = f"run_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:8]}"
+        run_dir = self.config.index_dir / "runs" / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        output_path = Path(output) if output else run_dir / "pr-review.md"
+        if not output_path.is_absolute():
+            output_path = self.config.repo_path / output_path
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        markdown = self._render_pr_review(
+            run_id=run_id,
+            base=base,
+            changed_files=changed_files,
+            impacted_symbols=[symbol.name for symbol in changed_symbols],
+            risk_level=risk_level,
+            suggested_tests=related_tests,
+            warnings=warnings,
+        )
+        output_path.write_text(markdown, encoding="utf-8")
+        payload = {
+            "run_id": run_id,
+            "base": base,
+            "changed_files": changed_files,
+            "impacted_symbols": [symbol.name for symbol in changed_symbols],
+            "risk_level": risk_level,
+            "suggested_tests": related_tests,
+            "warnings": warnings,
+            "saved": {"pr_review_md": str(output_path)},
+        }
+        (run_dir / "pr-review.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        return payload
 
     def baseline_context(self, query: str, token_budget: int | None = None) -> ContextPack:
         snapshot = self._ensure_snapshot()
@@ -984,6 +1070,7 @@ class Chronicle:
     def _render_agent_packet(
         self,
         *,
+        run_id: str,
         query: str,
         target: str,
         context: ContextPack,
@@ -992,10 +1079,11 @@ class Chronicle:
         warnings: list[str],
     ) -> str:
         lines = [
-            "# Chronicle Context Packet",
+            "# Chronicle Context",
             "",
-            "## Task",
-            query,
+            f"Run ID: {run_id}",
+            f"Repo: {self.config.repo_path}",
+            f"Task: {query}",
             "",
             "## Instructions for the Coding Agent",
             "Use this as the primary repo context.",
@@ -1122,7 +1210,9 @@ class Chronicle:
     def _compact_review(self, review: dict[str, Any]) -> dict[str, Any]:
         return {
             "review_id": review.get("review_id"),
+            "run_id": review.get("run_id"),
             "query": review.get("query"),
+            "risk_level": review.get("risk_level"),
             "changed_files": review.get("changed_files", []),
             "changed_symbols": review.get("changed_symbols", [])[:12],
             "related_files": review.get("related_files", [])[:8],
@@ -1134,6 +1224,7 @@ class Chronicle:
     def _compact_handoff(self, handoff: dict[str, Any]) -> dict[str, Any]:
         return {
             "handoff_id": handoff.get("handoff_id"),
+            "run_id": handoff.get("run_id"),
             "task": handoff.get("task"),
             "changed_files": handoff.get("changed_files", []),
             "latest_prepare": handoff.get("latest_prepare"),
@@ -1256,6 +1347,7 @@ class Chronicle:
     def _render_review_packet(
         self,
         *,
+        run_id: str,
         query: str,
         changed_files: list[str],
         changed_symbols: list[str],
@@ -1263,13 +1355,19 @@ class Chronicle:
         related_tests: list[str],
         warnings: list[str],
         context: ContextPack,
+        risk_level: str,
     ) -> str:
         lines = [
-            "# Chronicle Review Packet",
+            "# Chronicle Review",
             "",
-            "## Review Goal",
-            query,
+            f"Run ID: {run_id}",
+            f"Repo: {self.config.repo_path}",
+            f"Task: {query}",
             "",
+            "## Summary",
+            f"- Risk level: {risk_level}",
+            f"- Changed files: {len(changed_files)}",
+            f"- Impacted symbols: {len(changed_symbols)}",
             "## Changed Files",
         ]
         lines.extend([f"- {file_path}" for file_path in changed_files] or ["- none detected"])
@@ -1287,6 +1385,7 @@ class Chronicle:
     def _render_handoff_packet(
         self,
         *,
+        run_id: str,
         task: str,
         status: dict[str, Any],
         prepare_payload: dict[str, Any] | None,
@@ -1298,8 +1397,9 @@ class Chronicle:
         lines = [
             "# Chronicle Handoff",
             "",
-            "## Task",
-            task,
+            f"Run ID: {run_id}",
+            f"Repo: {self.config.repo_path}",
+            f"Task: {task}",
             "",
             "## Repo Status",
             f"- Index status: {status.get('index_status')}",
@@ -1337,6 +1437,182 @@ class Chronicle:
         lines.extend([f"- {note}" for note in notes] or ["- none"])
         return "\n".join(lines).strip() + "\n"
 
+    def _render_pr_review(
+        self,
+        *,
+        run_id: str,
+        base: str,
+        changed_files: list[str],
+        impacted_symbols: list[str],
+        risk_level: str,
+        suggested_tests: list[str],
+        warnings: list[str],
+    ) -> str:
+        lines = [
+            "# Chronicle PR Review",
+            "",
+            f"Run ID: {run_id}",
+            f"Repo: {self.config.repo_path}",
+            f"Task: Review local changes against {base}",
+            "",
+            "## Summary",
+            f"- Base: {base}",
+            f"- Risk level: {risk_level}",
+            f"- Changed files: {len(changed_files)}",
+            "",
+            "## Changed Files",
+        ]
+        lines.extend([f"- {file_path}" for file_path in changed_files] or ["- none"])
+        lines.extend(["", "## Impacted Symbols"])
+        lines.extend([f"- {symbol}" for symbol in impacted_symbols[:16]] or ["- none detected"])
+        lines.extend(["", "## Risk Level", risk_level])
+        lines.extend(["", "## Suggested Tests"])
+        lines.extend([f"- {file_path}" for file_path in suggested_tests] or ["- none found"])
+        lines.extend(["", "## Missing Tests / Warnings"])
+        lines.extend([f"- {warning}" for warning in warnings] or ["- none"])
+        lines.extend(["", "## Reviewer Notes", "- Inspect changed files and run the suggested tests before merging."])
+        return "\n".join(lines).strip() + "\n"
+
+    def _risk_level(self, *, changed_files: list[str], warnings: list[str]) -> str:
+        if not changed_files:
+            return "low"
+        if len(changed_files) > 8 or len(warnings) > 2:
+            return "high"
+        if len(changed_files) > 3 or warnings:
+            return "medium"
+        return "low"
+
+    def _append_agent_setup(self, filename: str, section: str) -> dict[str, str]:
+        path = self.config.repo_path / filename
+        existed = path.exists()
+        current = path.read_text(encoding="utf-8") if existed else ""
+        marker = "## Chronicle Context Workflow"
+        if marker in current:
+            return {"agent": "codex" if filename == "AGENTS.md" else "claude", "path": str(path), "action": "unchanged"}
+        prefix = "\n\n" if current.strip() else ""
+        path.write_text(current.rstrip() + prefix + section, encoding="utf-8")
+        return {"agent": "codex" if filename == "AGENTS.md" else "claude", "path": str(path), "action": "updated" if existed else "created"}
+
+    def _agent_setup_section(self, agent_name: str) -> str:
+        return (
+            "## Chronicle Context Workflow\n\n"
+            "Before large or risky code changes, run:\n\n"
+            "```bash\nchronicle prepare \"<task>\"\n```\n\n"
+            "Use the generated `chronicle_logs/runs/<run_id>/prepare.md` as the primary repo context.\n\n"
+            "After editing code, run:\n\n"
+            "```bash\nchronicle review\n```\n\n"
+            "Before handing off, run:\n\n"
+            "```bash\nchronicle handoff\n```\n\n"
+            f"Prefer Chronicle-generated context over random full-repo scans when working with {agent_name}.\n"
+        )
+
+    def _cursor_setup_section(self) -> str:
+        return (
+            "---\n"
+            "description: Chronicle context workflow for large AI-assisted code changes\n"
+            "alwaysApply: false\n"
+            "---\n\n"
+            "Before large or risky code changes, run `chronicle prepare \"<task>\"` and use the generated "
+            "`chronicle_logs/runs/<run_id>/prepare.md` as primary repo context.\n\n"
+            "After editing code, run `chronicle review`.\n\n"
+            "Before handing off, run `chronicle handoff`.\n"
+        )
+
+    def _setup_agent_mcp(self, agent: str) -> dict[str, Any]:
+        command = self._mcp_command()
+        manual = self._manual_mcp_command(agent, command)
+        if agent == "codex":
+            return self._setup_cli_mcp(
+                agent="codex",
+                executable="codex",
+                add_command=["codex", "mcp", "add", "chronicle", "--", *command],
+                list_command=["codex", "mcp", "list"],
+                manual_command=manual,
+            )
+        if agent == "claude":
+            return self._setup_cli_mcp(
+                agent="claude",
+                executable="claude",
+                add_command=["claude", "mcp", "add", "chronicle", "--", *command],
+                list_command=["claude", "mcp", "list"],
+                manual_command=manual,
+            )
+        if agent == "cursor":
+            return self._setup_cursor_mcp(command=command, manual_command=manual)
+        return {"agent": agent, "name": "chronicle", "status": "skipped", "reason": "Unsupported agent.", "manual_command": manual}
+
+    def _setup_cli_mcp(
+        self,
+        *,
+        agent: str,
+        executable: str,
+        add_command: list[str],
+        list_command: list[str],
+        manual_command: str,
+    ) -> dict[str, Any]:
+        if shutil.which(executable) is None:
+            return {
+                "agent": agent,
+                "name": "chronicle",
+                "status": "skipped",
+                "reason": f"`{executable}` was not found.",
+                "manual_command": manual_command,
+            }
+        listed = subprocess.run(list_command, cwd=self.config.repo_path, capture_output=True, text=True, check=False)
+        if listed.returncode == 0 and "chronicle" in listed.stdout:
+            return {"agent": agent, "name": "chronicle", "status": "already_configured", "manual_command": manual_command}
+        added = subprocess.run(add_command, cwd=self.config.repo_path, capture_output=True, text=True, check=False)
+        if added.returncode == 0:
+            return {"agent": agent, "name": "chronicle", "status": "configured", "manual_command": manual_command}
+        message = (added.stderr or added.stdout or "MCP registration command failed.").strip()
+        return {
+            "agent": agent,
+            "name": "chronicle",
+            "status": "skipped",
+            "reason": message,
+            "manual_command": manual_command,
+        }
+
+    def _setup_cursor_mcp(self, *, command: list[str], manual_command: str) -> dict[str, Any]:
+        path = self.config.repo_path / ".cursor" / "mcp.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        config: dict[str, Any] = {}
+        if path.exists():
+            try:
+                config = json.loads(path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                return {
+                    "agent": "cursor",
+                    "name": "chronicle",
+                    "status": "skipped",
+                    "reason": f"{path} is not valid JSON.",
+                    "manual_command": manual_command,
+                }
+        servers = config.setdefault("mcpServers", {})
+        existed = "chronicle" in servers
+        servers["chronicle"] = {"command": command[0], "args": command[1:]}
+        path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+        return {
+            "agent": "cursor",
+            "name": "chronicle",
+            "status": "updated" if existed else "configured",
+            "path": str(path),
+            "manual_command": manual_command,
+        }
+
+    def _mcp_command(self) -> list[str]:
+        return ["chronicle-mcp", "--repo", str(self.config.repo_path)]
+
+    def _manual_mcp_command(self, agent: str, command: list[str]) -> str:
+        command_text = " ".join(command)
+        if agent == "codex":
+            return f"codex mcp add chronicle -- {command_text}"
+        if agent == "claude":
+            return f"claude mcp add chronicle -- {command_text}"
+        if agent == "cursor":
+            return f"Add `.cursor/mcp.json` with command `{command[0]}` and args {command[1:]}"
+        return command_text
+
     def _latest_artifact(self, folder: str) -> dict[str, Any] | None:
         latest_path = self.config.index_dir / folder / "latest.json"
         if not latest_path.exists():
@@ -1367,7 +1643,13 @@ class Chronicle:
     def _load_artifact_payload(self, pointer: dict[str, Any] | None) -> dict[str, Any] | None:
         if not pointer:
             return None
-        path_value = pointer.get("json") or pointer.get("run_json") or pointer.get("review_json") or pointer.get("handoff_json")
+        path_value = (
+            pointer.get("json")
+            or pointer.get("prepare_json")
+            or pointer.get("run_json")
+            or pointer.get("review_json")
+            or pointer.get("handoff_json")
+        )
         if not path_value:
             return None
         path = Path(path_value)
@@ -2237,3 +2519,33 @@ class Chronicle:
             if untracked.returncode == 0:
                 files.extend(line.strip() for line in untracked.stdout.splitlines() if line.strip().endswith(".py"))
         return list(dict.fromkeys(files))
+
+    def _git_changed_files(self, *, base: str) -> list[str]:
+        result = subprocess.run(
+            ["git", "diff", "--name-only", f"{base}...HEAD"],
+            cwd=self.config.repo_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            result = subprocess.run(
+                ["git", "diff", "--name-only", base],
+                cwd=self.config.repo_path,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        elif not result.stdout.strip():
+            working = subprocess.run(
+                ["git", "diff", "--name-only", base],
+                cwd=self.config.repo_path,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if working.returncode == 0:
+                result = working
+        if result.returncode != 0:
+            raise ValueError(f"Unable to diff against `{base}`. Check that the base branch or ref exists.")
+        return [line.strip() for line in result.stdout.splitlines() if line.strip()]

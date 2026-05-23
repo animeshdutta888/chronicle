@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import importlib.util
 import os
 import subprocess
+from unittest.mock import patch
 
 from chronicle import Chronicle
 from chronicle import cli as chronicle_cli
@@ -47,6 +48,76 @@ class GroundingSkewProvider:
 
 
 class ReasoningTests(unittest.TestCase):
+    def test_setup_agents_create_or_append_workflow_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "AGENTS.md").write_text("# Existing notes\n", encoding="utf-8")
+
+            chronicle = Chronicle(repo_path=root)
+            result = chronicle.setup_agent("all", configure_mcp=False)
+
+            self.assertEqual(len(result["updated"]), 3)
+            agents = (root / "AGENTS.md").read_text(encoding="utf-8")
+            self.assertIn("# Existing notes", agents)
+            self.assertIn("## Chronicle Context Workflow", agents)
+            self.assertIn("chronicle prepare", (root / "CLAUDE.md").read_text(encoding="utf-8"))
+            self.assertTrue((root / ".cursor" / "rules" / "chronicle.mdc").exists())
+
+            second = chronicle.setup_agent("codex", configure_mcp=False)
+            self.assertEqual(second["updated"][0]["action"], "unchanged")
+            self.assertEqual((root / "AGENTS.md").read_text(encoding="utf-8").count("## Chronicle Context Workflow"), 1)
+
+    def test_setup_codex_mcp_skips_when_cli_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            chronicle = Chronicle(repo_path=root)
+
+            with patch("chronicle.api.shutil.which", return_value=None):
+                result = chronicle.setup_agent("codex", instructions=False)
+
+            self.assertEqual(result["updated"], [])
+            self.assertEqual(result["configured"][0]["status"], "skipped")
+            self.assertIn("codex mcp add chronicle", result["configured"][0]["manual_command"])
+
+    def test_setup_cursor_mcp_writes_project_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            chronicle = Chronicle(repo_path=root)
+
+            result = chronicle.setup_agent("cursor", instructions=False)
+            mcp_json = root / ".cursor" / "mcp.json"
+            config = json.loads(mcp_json.read_text(encoding="utf-8"))
+
+            self.assertEqual(result["configured"][0]["status"], "configured")
+            self.assertEqual(config["mcpServers"]["chronicle"]["command"], "chronicle-mcp")
+            self.assertEqual(config["mcpServers"]["chronicle"]["args"], ["--repo", str(root.resolve())])
+
+    def test_pr_review_handles_changed_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init", "-b", "main"], cwd=root, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=root, check=True)
+            subprocess.run(["git", "config", "user.name", "Chronicle Test"], cwd=root, check=True)
+            (root / "auth.py").write_text("def refresh_token(client):\n    return client.refresh()\n", encoding="utf-8")
+            subprocess.run(["git", "add", "auth.py"], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-m", "initial"], cwd=root, check=True, capture_output=True)
+            subprocess.run(["git", "checkout", "-b", "feature"], cwd=root, check=True, capture_output=True)
+            (root / "auth.py").write_text("def refresh_token(client):\n    token = client.refresh()\n    return token\n", encoding="utf-8")
+
+            chronicle = Chronicle(repo_path=root)
+            result = chronicle.pr_review(base="main")
+
+            self.assertIn("auth.py", result["changed_files"])
+            self.assertIn("refresh_token", result["impacted_symbols"])
+            self.assertTrue(Path(result["saved"]["pr_review_md"]).exists())
+
+    def test_pr_review_requires_git_repo(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            chronicle = Chronicle(repo_path=Path(tmp))
+
+            with self.assertRaises(ValueError):
+                chronicle.pr_review(base="main")
+
     def test_context_prefers_exact_symbol_and_respects_budget(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1071,7 +1142,10 @@ class ReasoningTests(unittest.TestCase):
             self.assertIn("Tests were not recorded", " ".join(handoff["warnings"]))
             self.assertIn("Latest review does not cover changed files", " ".join(handoff["warnings"]))
             self.assertIn("Handoff task differs", " ".join(handoff["warnings"]))
-            self.assertIn("## Handoff Warnings", (root / "chronicle_logs" / "handoffs" / handoff["handoff_id"] / "handoff.md").read_text(encoding="utf-8"))
+            self.assertIn(
+                "## Handoff Warnings",
+                (root / "chronicle_logs" / "runs" / handoff["handoff_id"] / "handoff.md").read_text(encoding="utf-8"),
+            )
 
     def test_mcp_stdio_server_supports_initialize_and_tools(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

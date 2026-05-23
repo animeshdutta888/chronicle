@@ -42,7 +42,7 @@ def main() -> None:
 
     print("1. Prepare context for the coding agent")
     prepared = chronicle.prepare(args.task, token_budget=args.token_budget)
-    print(f"Prepared: {prepared['saved']['context_md']}")
+    print(f"Prepared: {prepared['saved']['prepare_md']}")
     print(f"Selected files: {', '.join(prepared['selected_files']) or 'none'}")
     print()
 

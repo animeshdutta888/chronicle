@@ -114,6 +114,28 @@ def build_parser() -> argparse.ArgumentParser:
     handoff_parser.add_argument("--note", action="append", default=None, help="Optional handoff note.")
     handoff_parser.add_argument("--view", choices=["compact", "full"], default="compact", help="Compact human view or full machine detail.")
 
+    setup_parser = subparsers.add_parser("setup", help="Add Chronicle workflow instructions for Codex, Claude, or Cursor.")
+    setup_parser.add_argument("agent", choices=["codex", "claude", "cursor", "all"], help="Agent workflow file to configure.")
+    setup_parser.add_argument("--repo", default=".", help="Path to the git repository or local codebase.")
+    setup_parser.add_argument("--repo-url", default=None, help="Git URL to clone/pull before setup.")
+    setup_parser.add_argument("--repos-dir", default=None, help="Directory used for cloned remote repositories.")
+    setup_parser.add_argument("--branch", default=None, help="Optional branch to checkout/pull.")
+    setup_parser.add_argument("--index-dir", default=None, help="Directory containing Chronicle artifacts.")
+    setup_parser.add_argument("--view", choices=["compact", "full"], default="compact", help="Compact human view or full machine detail.")
+    setup_parser.add_argument("--no-mcp", action="store_true", help="Only update agent instruction files; do not register MCP.")
+    setup_parser.add_argument("--mcp-only", action="store_true", help="Only register MCP; do not update agent instruction files.")
+
+    pr_review_parser = subparsers.add_parser("pr-review", help="Create a local PR review artifact from git diff.")
+    pr_review_parser.add_argument("--base", default="main", help="Base branch or ref to diff against.")
+    pr_review_parser.add_argument("--format", choices=["markdown"], default="markdown", help="Output format.")
+    pr_review_parser.add_argument("--output", default=None, help="Optional output markdown path.")
+    pr_review_parser.add_argument("--repo", default=".", help="Path to the git repository or local codebase.")
+    pr_review_parser.add_argument("--repo-url", default=None, help="Git URL to clone/pull before analysis.")
+    pr_review_parser.add_argument("--repos-dir", default=None, help="Directory used for cloned remote repositories.")
+    pr_review_parser.add_argument("--branch", default=None, help="Optional branch to checkout/pull.")
+    pr_review_parser.add_argument("--index-dir", default=None, help="Directory containing Chronicle artifacts.")
+    pr_review_parser.add_argument("--view", choices=["compact", "full"], default="compact", help="Compact human view or full machine detail.")
+
     evaluate_parser = subparsers.add_parser("evaluate", help="Compare Chronicle context against a baseline.")
     evaluate_parser.add_argument("query", help="Question to evaluate.")
     evaluate_parser.add_argument("--repo", default=".", help="Path to the git repository or local codebase.")
@@ -351,6 +373,28 @@ def main(argv: list[str] | None = None) -> int:
             print(_success(command=args.command, data=payload))
             return 0
 
+        if args.command == "setup":
+            if args.no_mcp and args.mcp_only:
+                raise ValueError("Use only one of `--no-mcp` or `--mcp-only`.")
+            payload = chronicle.setup_agent(
+                args.agent,
+                configure_mcp=not args.no_mcp,
+                instructions=not args.mcp_only,
+            )
+            if args.view == "compact":
+                print(_setup_text(payload))
+                return 0
+            print(_success(command=args.command, data=payload))
+            return 0
+
+        if args.command == "pr-review":
+            payload = chronicle.pr_review(base=args.base, output=args.output)
+            if args.view == "compact":
+                print(_pr_review_text(payload))
+                return 0
+            print(_success(command=args.command, data=payload))
+            return 0
+
         if args.command == "evaluate":
             report = chronicle.evaluate(
                 query=args.query,
@@ -539,8 +583,8 @@ def _prepare_text(data: dict) -> str:
         [
             "",
             "Saved:",
-            f"- {saved.get('context_md')}",
-            f"- {saved.get('run_json')}",
+            f"- {saved.get('prepare_md')}",
+            f"- {saved.get('prepare_json')}",
             "",
             f"Replay: chronicle replay --run {data.get('run_id')}",
             f"Explain: chronicle explain --run {data.get('run_id')}",
@@ -579,7 +623,8 @@ def _review_text(data: dict) -> str:
     lines = [
         "Chronicle reviewed recent changes",
         "",
-        f"Review: {data.get('review_id')}",
+        f"Run ID: {data.get('run_id') or data.get('review_id')}",
+        f"Risk level: {data.get('risk_level', 'unknown')}",
         f"Changed: {len(data.get('changed_files', []))} files, {len(data.get('changed_symbols', []))} symbols",
         f"Related: {len(data.get('related_files', []))} files, {len(data.get('related_tests', []))} tests",
         "",
@@ -605,18 +650,76 @@ def _review_text(data: dict) -> str:
 
 def _handoff_text(data: dict) -> str:
     saved = data.get("saved") or {}
+    latest_review = data.get("latest_review") or {}
     lines = [
         "Chronicle created handoff",
         "",
-        f"Handoff: {data.get('handoff_id')}",
+        f"Run ID: {data.get('run_id') or data.get('handoff_id')}",
         f"Task: {data.get('task')}",
         f"Changed files: {len(data.get('changed_files', []))}",
+        f"Review summary: {latest_review.get('task') or latest_review.get('id') or 'none'}",
         f"Tests: {data.get('tests') or 'not recorded'}",
+        "",
+        "Risks and warnings:",
+    ]
+    lines.extend([f"- {warning}" for warning in data.get("warnings", [])] or ["- none"])
+    lines.extend([
+        "",
+        "Suggested tests:",
+        "- see review.md",
         "",
         "Saved:",
         f"- {saved.get('handoff_md')}",
         f"- {saved.get('handoff_json')}",
+    ])
+    return "\n".join(lines)
+
+
+def _setup_text(data: dict) -> str:
+    mcp_results = data.get("configured", [])
+    skipped = [item for item in mcp_results if item.get("status") == "skipped"]
+    title = "Chronicle agent setup partially complete" if skipped else "Chronicle agent setup complete"
+    lines = [title, "", f"Repo: {data.get('repo')}"]
+    if data.get("updated"):
+        lines.extend(["", "Updated:"])
+    for item in data.get("updated", []):
+        lines.append(f"- {item.get('agent')}: {item.get('action')} {item.get('path')}")
+    if mcp_results:
+        lines.extend(["", "Configured:"])
+    for item in mcp_results:
+        if item.get("status") == "skipped":
+            continue
+        status = item.get("status")
+        suffix = f" ({status})" if status else ""
+        lines.append(f"- {item.get('agent')} MCP server: {item.get('name')}{suffix}")
+    if skipped:
+        lines.extend(["", "Skipped:"])
+        for item in skipped:
+            lines.append(f"- {item.get('agent')} MCP setup because {item.get('reason')}")
+        lines.extend(["", "To add MCP later:"])
+        for command in dict.fromkeys(item.get("manual_command") for item in skipped if item.get("manual_command")):
+            lines.append(f"  {command}")
+    lines.extend(["", "Next:", "  In your agent, ask it to use Chronicle before large code changes."])
+    return "\n".join(lines)
+
+
+def _pr_review_text(data: dict) -> str:
+    saved = data.get("saved") or {}
+    lines = [
+        "Chronicle PR review",
+        "",
+        f"Run ID: {data.get('run_id')}",
+        f"Base: {data.get('base')}",
+        f"Risk level: {data.get('risk_level')}",
+        f"Changed files: {len(data.get('changed_files', []))}",
+        f"Impacted symbols: {len(data.get('impacted_symbols', []))}",
+        "",
+        "Suggested tests:",
     ]
+    lines.extend([f"- {test}" for test in data.get("suggested_tests", [])] or ["- none found"])
+    lines.extend(["", "Warnings:"])
+    lines.extend([f"- {warning}" for warning in data.get("warnings", [])] or ["- none"])
+    lines.extend(["", "Saved:", f"- {saved.get('pr_review_md')}"])
     return "\n".join(lines)
 
 
