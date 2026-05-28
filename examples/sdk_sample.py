@@ -6,8 +6,8 @@ from pathlib import Path
 from chronicle import Chronicle
 
 
-DEFAULT_REPO = "/Users/animeshdutta/Projects/Nudge_git"
-DEFAULT_TASK = "Improve ManagerAgent.run reminder orchestration safely"
+DEFAULT_REPO = "."
+DEFAULT_TASK = "Fix auth token refresh bug"
 
 
 def main() -> None:
@@ -17,7 +17,7 @@ def main() -> None:
     parser.add_argument(
         "--repo",
         default=DEFAULT_REPO,
-        help="Local repository to analyze. Defaults to the local Nudge repo path used during development.",
+        help="Local repository to analyze. Defaults to the current directory.",
     )
     parser.add_argument(
         "--task",

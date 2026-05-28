@@ -53,6 +53,40 @@ def build_parser() -> argparse.ArgumentParser:
     prepare_parser.add_argument("--no-auto-index", action="store_true", help="Fail instead of auto-indexing when no index exists.")
     prepare_parser.add_argument("--force-reindex", action="store_true", help="Rebuild the index before preparing context.")
 
+    run_parser = subparsers.add_parser("run", help="Prepare a full Chronicle manual agent run.")
+    run_parser.add_argument("task", help="Coding task to prepare for an agent.")
+    run_parser.add_argument("--manual", action="store_true", help="Prepare files for manual paste into an agent.")
+    run_parser.add_argument("--target", choices=["codex", "claude", "cursor", "generic"], default="generic", help="Agent prompt target.")
+    run_parser.add_argument("--repo", default=".", help="Path to the git repository or local codebase.")
+    run_parser.add_argument("--repo-url", default=None, help="Git URL to clone/pull before analysis.")
+    run_parser.add_argument("--repos-dir", default=None, help="Directory used for cloned remote repositories.")
+    run_parser.add_argument("--branch", default=None, help="Optional branch to checkout/pull.")
+    run_parser.add_argument("--index-dir", default=None, help="Directory containing Chronicle artifacts.")
+    run_parser.add_argument("--token-budget", type=int, default=None, help="Override token budget.")
+    run_parser.add_argument("--session-id", default=None, help="Optional Chronicle session id for multi-turn memory.")
+    run_parser.add_argument("--view", choices=["compact", "full"], default="compact", help="Compact human view or full machine detail.")
+
+    finish_parser = subparsers.add_parser("finish", help="Finish a Chronicle run by capturing diff, review, and report artifacts.")
+    finish_parser.add_argument("--run", default=None, help="Run id to finish. Defaults to the active run.")
+    finish_parser.add_argument("--base", default="main", help="Base branch or ref for PR review.")
+    finish_parser.add_argument("--repo", default=".", help="Path to the git repository or local codebase.")
+    finish_parser.add_argument("--repo-url", default=None, help="Git URL to clone/pull before analysis.")
+    finish_parser.add_argument("--repos-dir", default=None, help="Directory used for cloned remote repositories.")
+    finish_parser.add_argument("--branch", default=None, help="Optional branch to checkout/pull.")
+    finish_parser.add_argument("--index-dir", default=None, help="Directory containing Chronicle artifacts.")
+    finish_parser.add_argument("--view", choices=["compact", "full"], default="compact", help="Compact human view or full machine detail.")
+
+    report_parser = subparsers.add_parser("report", help="Print or regenerate a Chronicle run report.")
+    report_parser.add_argument("--latest", action="store_true", help="Use the latest active run.")
+    report_parser.add_argument("--run", default=None, help="Run id to report.")
+    report_parser.add_argument("--format", choices=["markdown"], default="markdown", help="Report format.")
+    report_parser.add_argument("--repo", default=".", help="Path to the git repository or local codebase.")
+    report_parser.add_argument("--repo-url", default=None, help="Git URL to clone/pull before analysis.")
+    report_parser.add_argument("--repos-dir", default=None, help="Directory used for cloned remote repositories.")
+    report_parser.add_argument("--branch", default=None, help="Optional branch to checkout/pull.")
+    report_parser.add_argument("--index-dir", default=None, help="Directory containing Chronicle artifacts.")
+    report_parser.add_argument("--view", choices=["compact", "full"], default="compact", help="Compact human view or full machine detail.")
+
     replay_parser = subparsers.add_parser("replay", help="Replay saved Chronicle prepare runs without recomputing context.")
     replay_parser.add_argument("--repo", default=".", help="Path to the git repository or local codebase.")
     replay_parser.add_argument("--repo-url", default=None, help="Git URL to clone/pull before analysis.")
@@ -306,6 +340,45 @@ def main(argv: list[str] | None = None) -> int:
             )
             if args.view == "compact":
                 print(_prepare_text(payload))
+                return 0
+            print(_success(command=args.command, data=payload))
+            return 0
+
+        if args.command == "run":
+            payload = chronicle.run(
+                task=args.task,
+                target=getattr(args, "target", "generic"),
+                manual=getattr(args, "manual", False),
+                token_budget=getattr(args, "token_budget", None),
+                session_id=getattr(args, "session_id", None),
+                view=getattr(args, "view", "compact"),
+            )
+            if args.view == "compact":
+                print(_run_text(payload))
+                return 0
+            print(_success(command=args.command, data=payload))
+            return 0
+
+        if args.command == "finish":
+            payload = chronicle.finish(
+                run_id=getattr(args, "run", None),
+                base=getattr(args, "base", "main"),
+                view=getattr(args, "view", "compact"),
+            )
+            if args.view == "compact":
+                print(_finish_text(payload))
+                return 0
+            print(_success(command=args.command, data=payload))
+            return 0
+
+        if args.command == "report":
+            payload = chronicle.report(
+                run_id=getattr(args, "run", None),
+                latest=getattr(args, "latest", False) or getattr(args, "run", None) is None,
+                view=getattr(args, "view", "compact"),
+            )
+            if args.view == "compact":
+                print(payload.get("report", ""))
                 return 0
             print(_success(command=args.command, data=payload))
             return 0
@@ -590,6 +663,47 @@ def _prepare_text(data: dict) -> str:
             f"Explain: chronicle explain --run {data.get('run_id')}",
         ]
     )
+    return "\n".join(lines)
+
+
+def _run_text(data: dict) -> str:
+    saved = data.get("saved") or {}
+    lines = [
+        "Chronicle prepared a token-optimized context packet.",
+        "",
+        f"Run ID: {data.get('run_id')}",
+        f"Task: {data.get('task')}",
+        f"Agent prompt saved: {saved.get('agent_prompt_md')}",
+        "",
+        "Next:",
+    ]
+    lines.extend(f"{index}. {step}" for index, step in enumerate(data.get("next", []), start=1))
+    lines.extend(["", "Saved:"])
+    for key in ("prepare_md", "context_packet_md", "agent_prompt_md", "run_json"):
+        if saved.get(key):
+            lines.append(f"- {saved[key]}")
+    return "\n".join(lines)
+
+
+def _finish_text(data: dict) -> str:
+    saved = data.get("saved") or {}
+    lines = [
+        "Chronicle finished run",
+        "",
+        f"Run ID: {data.get('run_id')}",
+        f"Status: {data.get('status')}",
+        f"Risk level: {data.get('risk_level')}",
+        f"Context Quality Score: {data.get('context_quality_score')}/100",
+        f"Changed files: {len(data.get('changed_files', []))}",
+        "",
+        "Suggested tests:",
+    ]
+    lines.extend([f"- {test}" for test in data.get("suggested_tests", [])] or ["- none found"])
+    lines.extend(["", f"Report saved: {saved.get('report_md')}", "", "Saved:"])
+    for key in ("diff_patch", "review_md", "pr_review_md", "run_json"):
+        if saved.get(key):
+            lines.append(f"- {saved[key]}")
+    lines.extend(["", f"To print it again: chronicle report --run {data.get('run_id')}"])
     return "\n".join(lines)
 
 

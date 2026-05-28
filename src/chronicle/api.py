@@ -491,6 +491,142 @@ class Chronicle:
         latest_path.write_text(json.dumps({"run_id": run_id, "prepare_json": str(prepare_json_path)}, indent=2), encoding="utf-8")
         return run if view == "full" else self._compact_prepare_run(run)
 
+    def run(
+        self,
+        task: str,
+        *,
+        target: str = "generic",
+        manual: bool = False,
+        token_budget: int | None = None,
+        session_id: str | None = None,
+        view: str = "compact",
+    ) -> dict[str, Any]:
+        try:
+            prepared = self.prepare(
+                task,
+                token_budget=token_budget,
+                session_id=session_id,
+                target=target,
+                view="full",
+            )
+        except ValueError as exc:
+            if "did not index any Python symbols" not in str(exc):
+                raise
+            prepared = self._basic_prepare_run(task=task, target=target)
+        run_id = prepared["run_id"]
+        run_dir = self.config.index_dir / "runs" / run_id
+        context_packet_path = run_dir / "context_packet.md"
+        agent_prompt_path = run_dir / "agent_prompt.md"
+        run_json_path = run_dir / "run.json"
+        context_packet_path.write_text(self._render_context_packet(prepared=prepared), encoding="utf-8")
+        agent_prompt = self._render_agent_prompt(prepared=prepared, context_packet_path=context_packet_path)
+        agent_prompt_path.write_text(agent_prompt, encoding="utf-8")
+        run_state = {
+            "run_id": run_id,
+            "status": "prepared",
+            "task": task,
+            "repo_path": str(self.config.repo_path),
+            "target": target,
+            "manual": manual,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "timeline": [
+                {"event": "Context prepared", "artifact": "prepare.md"},
+                {"event": "Context packet generated", "artifact": "context_packet.md"},
+                {"event": "Agent prompt generated", "artifact": "agent_prompt.md"},
+            ],
+            "artifacts": {
+                **prepared.get("output_files", {}),
+                "context_packet_md": str(context_packet_path),
+                "agent_prompt_md": str(agent_prompt_path),
+                "run_json": str(run_json_path),
+            },
+            "prepare": {
+                "readiness": prepared.get("readiness"),
+                "selected_files": prepared.get("selected_files", []),
+                "selected_symbols": prepared.get("selected_symbols", []),
+                "related_tests": prepared.get("related_tests", []),
+                "warnings": prepared.get("missing_context_warnings", []),
+                "token_stats": prepared.get("token_stats", {}),
+                "selection_reasons": prepared.get("selection_reasons", {}),
+                "excluded_candidates": prepared.get("excluded_candidates", []),
+            },
+        }
+        run_json_path.write_text(json.dumps(run_state, indent=2), encoding="utf-8")
+        self._write_active_run(run_id=run_id, run_json_path=run_json_path)
+        return run_state if view == "full" else self._compact_run(run_state)
+
+    def finish(
+        self,
+        *,
+        run_id: str | None = None,
+        base: str = "main",
+        view: str = "compact",
+    ) -> dict[str, Any]:
+        run_state = self._load_run_state(run_id=run_id, latest=True)
+        run_id = run_state["run_id"]
+        run_dir = self.config.index_dir / "runs" / run_id
+        diff_patch_path = run_dir / "diff.patch"
+        diff_patch_path.write_text(self._git_diff_patch(base=base), encoding="utf-8")
+        try:
+            review = self.review(query=f"Review changes for {run_state.get('task')}", view="full")
+        except ValueError as exc:
+            if "did not index any Python symbols" not in str(exc):
+                raise
+            review = self._basic_review(run_id=run_id, query=f"Review changes for {run_state.get('task')}")
+        pr_review = self.pr_review(base=base, run_id=run_id)
+        report = self._build_run_report(run_state=run_state, review=review, pr_review=pr_review, base=base)
+        report_path = run_dir / "report.md"
+        report_path.write_text(report, encoding="utf-8")
+        run_state.update(
+            {
+                "status": "finished",
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+                "base": base,
+                "risk_level": review.get("risk_level"),
+                "context_quality_score": self._context_quality_score(run_state=run_state, review=review),
+                "timeline": [
+                    {"event": "Context prepared", "artifact": "prepare.md"},
+                    {"event": "Agent prompt generated", "artifact": "agent_prompt.md"},
+                    {"event": "Code diff captured", "artifact": "diff.patch"},
+                    {"event": "Change reviewed", "artifact": "review.md"},
+                    {"event": "PR review generated", "artifact": "pr-review.md"},
+                    {"event": "Report generated", "artifact": "report.md"},
+                ],
+            }
+        )
+        run_state["artifacts"].update(
+            {
+                "diff_patch": str(diff_patch_path),
+                "review_md": review.get("output_files", {}).get("review_md"),
+                "review_json": review.get("output_files", {}).get("review_json"),
+                "pr_review_md": pr_review.get("saved", {}).get("pr_review_md"),
+                "report_md": str(report_path),
+            }
+        )
+        run_state["review"] = {
+            "changed_files": review.get("changed_files", []),
+            "changed_symbols": review.get("changed_symbols", []),
+            "related_tests": review.get("related_tests", []),
+            "warnings": review.get("warnings", []),
+            "risk_level": review.get("risk_level"),
+        }
+        (run_dir / "run.json").write_text(json.dumps(run_state, indent=2), encoding="utf-8")
+        self._write_active_run(run_id=run_id, run_json_path=run_dir / "run.json")
+        return run_state if view == "full" else self._compact_finished_run(run_state)
+
+    def report(self, *, run_id: str | None = None, latest: bool = False, view: str = "compact") -> dict[str, Any]:
+        run_state = self._load_run_state(run_id=run_id, latest=latest)
+        report_path = self.config.index_dir / "runs" / run_state["run_id"] / "report.md"
+        if not report_path.exists():
+            report_text = self._build_run_report(run_state=run_state, review=run_state.get("review", {}), pr_review={}, base=run_state.get("base", "main"))
+            report_path.write_text(report_text, encoding="utf-8")
+            run_state.setdefault("artifacts", {})["report_md"] = str(report_path)
+            (self.config.index_dir / "runs" / run_state["run_id"] / "run.json").write_text(json.dumps(run_state, indent=2), encoding="utf-8")
+        else:
+            report_text = report_path.read_text(encoding="utf-8")
+        payload = {"run_id": run_state["run_id"], "report_md": str(report_path), "report": report_text}
+        return payload if view == "full" else payload
+
     def replay(self, *, run_id: str | None = None, latest: bool = False, list_runs: bool = False, view: str = "compact") -> dict[str, Any]:
         runs_dir = self.config.index_dir / "runs"
         if list_runs:
@@ -519,6 +655,10 @@ class Chronicle:
             raise ValueError("Use `--latest`, `--list`, or `--run <run_id>`.")
         if not run_path.exists():
             raise ValueError(f"Chronicle could not find prepared run `{run_id or 'latest'}`.")
+        run_state_path = run_path.parent / "run.json"
+        if run_state_path.exists():
+            run_state = json.loads(run_state_path.read_text(encoding="utf-8"))
+            return run_state if view == "full" else self._compact_replay(run_state)
         run = json.loads(run_path.read_text(encoding="utf-8"))
         return run if view == "full" else self._compact_prepare_run(run)
 
@@ -778,7 +918,7 @@ class Chronicle:
                 mcp_results.append(self._setup_agent_mcp(item))
         return {"repo": str(self.config.repo_path), "updated": updated, "configured": mcp_results}
 
-    def pr_review(self, *, base: str = "main", output: str | None = None) -> dict[str, Any]:
+    def pr_review(self, *, base: str = "main", output: str | None = None, run_id: str | None = None) -> dict[str, Any]:
         if not (self.config.repo_path / ".git").exists():
             raise ValueError("Chronicle PR review requires a local git repository.")
         changed_files = self._git_changed_files(base=base)
@@ -791,15 +931,15 @@ class Chronicle:
         if changed_files and not related_tests:
             warnings.append("No related tests found for the changed files.")
         risk_level = self._risk_level(changed_files=changed_files, warnings=warnings)
-        run_id = f"run_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:8]}"
-        run_dir = self.config.index_dir / "runs" / run_id
+        resolved_run_id = run_id or f"run_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:8]}"
+        run_dir = self.config.index_dir / "runs" / resolved_run_id
         run_dir.mkdir(parents=True, exist_ok=True)
         output_path = Path(output) if output else run_dir / "pr-review.md"
         if not output_path.is_absolute():
             output_path = self.config.repo_path / output_path
         output_path.parent.mkdir(parents=True, exist_ok=True)
         markdown = self._render_pr_review(
-            run_id=run_id,
+            run_id=resolved_run_id,
             base=base,
             changed_files=changed_files,
             impacted_symbols=[symbol.name for symbol in changed_symbols],
@@ -809,7 +949,7 @@ class Chronicle:
         )
         output_path.write_text(markdown, encoding="utf-8")
         payload = {
-            "run_id": run_id,
+            "run_id": resolved_run_id,
             "base": base,
             "changed_files": changed_files,
             "impacted_symbols": [symbol.name for symbol in changed_symbols],
@@ -1079,7 +1219,7 @@ class Chronicle:
         warnings: list[str],
     ) -> str:
         lines = [
-            "# Chronicle Context",
+            "# Chronicle Prepare",
             "",
             f"Run ID: {run_id}",
             f"Repo: {self.config.repo_path}",
@@ -1130,6 +1270,86 @@ class Chronicle:
         lines.extend(["", "## Warnings"])
         lines.extend([f"- {warning}" for warning in warnings] or ["- none"])
         lines.extend(["", "## Context", context.compressed_context.strip()])
+        return "\n".join(lines).strip() + "\n"
+
+    def _render_context_packet(self, *, prepared: dict[str, Any]) -> str:
+        token_stats = prepared.get("token_stats", {})
+        reasons = prepared.get("selection_reasons", {})
+        lines = [
+            "# Chronicle Context Packet",
+            "",
+            "## Task",
+            str(prepared.get("task")),
+            "",
+            "## Token Budget",
+            f"- Estimated raw repo context: {token_stats.get('estimated_raw_tokens', 'unknown')} tokens",
+            f"- Chronicle context packet: {token_stats.get('packet_tokens', 'unknown')} tokens",
+            f"- Estimated reduction: {token_stats.get('reduction_percent', 'unknown')}%",
+            "",
+            "## Selected Files",
+            "",
+            "| File | Why included | Estimated tokens | Confidence |",
+            "|---|---|---:|---:|",
+        ]
+        for file_path in prepared.get("selected_files", []):
+            why = "; ".join(reasons.get(file_path, [])[:3]) or "direct task match"
+            lines.append(f"| {file_path} | {why} | estimated | medium |")
+        if not prepared.get("selected_files"):
+            lines.append("| none | no files selected | 0 | low |")
+        lines.extend(["", "## Selected Symbols", "", "| Symbol | File | Why included | Confidence |", "|---|---|---|---:|"])
+        for symbol in prepared.get("selected_symbols", [])[:16]:
+            lines.append(f"| {symbol} | selected context | symbol match | medium |")
+        if not prepared.get("selected_symbols"):
+            lines.append("| none | none | no Python symbols indexed | low |")
+        lines.extend(["", "## Related Tests", "", "| Test file | Why included |", "|---|---|"])
+        for test_file in prepared.get("related_tests", []):
+            lines.append(f"| {test_file} | path/name/content match |")
+        if not prepared.get("related_tests"):
+            lines.append("| none | no related tests found |")
+        lines.extend(["", "## Excluded Files", "", "| File | Why excluded |", "|---|---|"])
+        for item in prepared.get("excluded_candidates", [])[:16]:
+            lines.append(f"| {item} | outside selected token budget or lower rank |")
+        if not prepared.get("excluded_candidates"):
+            lines.append("| none recorded | no excluded candidates recorded |")
+        lines.extend(["", "## Warnings"])
+        lines.extend([f"- {warning}" for warning in prepared.get("missing_context_warnings", [])] or ["- none"])
+        lines.extend(
+            [
+                "",
+                "## Agent Instructions",
+                "- Use this context first.",
+                "- Do not read unrelated files unless necessary.",
+                "- Explain any additional files you inspect.",
+                "- After editing, run `chronicle finish`.",
+            ]
+        )
+        return "\n".join(lines).strip() + "\n"
+
+    def _render_agent_prompt(self, *, prepared: dict[str, Any], context_packet_path: Path) -> str:
+        lines = [
+            "# Agent Prompt",
+            "",
+            "You are working on this task:",
+            "",
+            str(prepared.get("task")),
+            "",
+            "Chronicle prepared a token-optimized context packet below. Use this context first. Do not read unrelated files unless necessary.",
+            "",
+            "Your goals:",
+            "1. Make the smallest correct change.",
+            "2. Stay within the files and symbols suggested unless the context is clearly missing something.",
+            "3. Add or update tests when relevant.",
+            "4. Explain any additional files you had to inspect.",
+            "5. After editing, tell the user to run:",
+            "",
+            "```bash",
+            "chronicle finish",
+            "```",
+            "",
+            "## Context Packet",
+            "",
+            f"Read: {context_packet_path}",
+        ]
         return "\n".join(lines).strip() + "\n"
 
     def _packet_primary_symbols(self, *, query: str, context: ContextPack) -> list[Any]:
@@ -1207,6 +1427,114 @@ class Chronicle:
             "saved": run.get("output_files", {}),
         }
 
+    def _compact_run(self, run: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "run_id": run.get("run_id"),
+            "status": run.get("status"),
+            "task": run.get("task"),
+            "target": run.get("target"),
+            "saved": run.get("artifacts", {}),
+            "next": [
+                f"Open {run.get('artifacts', {}).get('agent_prompt_md')}",
+                "Paste it into Codex, Claude, or Cursor",
+                "Let the agent edit code",
+                "Run `chronicle finish`",
+            ],
+        }
+
+    def _compact_finished_run(self, run: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "run_id": run.get("run_id"),
+            "status": run.get("status"),
+            "task": run.get("task"),
+            "risk_level": run.get("risk_level"),
+            "context_quality_score": run.get("context_quality_score"),
+            "changed_files": run.get("review", {}).get("changed_files", []),
+            "suggested_tests": run.get("review", {}).get("related_tests", []),
+            "saved": run.get("artifacts", {}),
+        }
+
+    def _compact_replay(self, run: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "run_id": run.get("run_id"),
+            "task": run.get("task"),
+            "status": run.get("status"),
+            "timeline": run.get("timeline", []),
+            "artifacts": run.get("artifacts", {}),
+        }
+
+    def _basic_prepare_run(self, *, task: str, target: str) -> dict[str, Any]:
+        run_id = f"run_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:8]}"
+        run_dir = self.config.index_dir / "runs" / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        files = self._basic_repo_files()
+        related_tests = [file_path for file_path in files if self._looks_like_test_file(file_path)][:8]
+        warnings = ["No Python symbols were indexed; Chronicle used basic git/file context."]
+        context_packet = self._render_basic_prepare_packet(run_id=run_id, task=task, target=target, files=files, related_tests=related_tests, warnings=warnings)
+        raw_tokens = sum(self.budget_manager.estimate_tokens(self._read_repo_file(file_path)) for file_path in files[:50])
+        packet_tokens = self.budget_manager.estimate_tokens(context_packet)
+        run = {
+            "run_id": run_id,
+            "command": "prepare",
+            "task": task,
+            "repo_path": str(self.config.repo_path),
+            "target": target,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "selected_files": files[:12],
+            "selected_symbols": [],
+            "related_tests": related_tests,
+            "excluded_candidates": files[12:50],
+            "selection_reasons": {file_path: self._basic_file_reasons(file_path) for file_path in files[:12]},
+            "missing_context_warnings": warnings,
+            "risk_warnings": self._risk_warnings_for_files(files[:12]),
+            "readiness": {"level": "low", "reason": "Basic file context was prepared without Python symbol indexing."},
+            "token_stats": {
+                "estimated_raw_tokens": raw_tokens,
+                "packet_tokens": packet_tokens,
+                "reduction_percent": round(max(0.0, ((raw_tokens - packet_tokens) / max(raw_tokens, 1)) * 100), 2),
+            },
+            "context_packet": context_packet,
+            "context": None,
+            "output_files": {
+                "prepare_md": str(run_dir / "prepare.md"),
+                "prepare_json": str(run_dir / "prepare.json"),
+            },
+        }
+        (run_dir / "prepare.md").write_text(context_packet, encoding="utf-8")
+        (run_dir / "prepare.json").write_text(json.dumps(run, indent=2), encoding="utf-8")
+        (self.config.index_dir / "runs" / "latest.json").write_text(json.dumps({"run_id": run_id, "prepare_json": str(run_dir / "prepare.json")}, indent=2), encoding="utf-8")
+        return run
+
+    def _render_basic_prepare_packet(
+        self,
+        *,
+        run_id: str,
+        task: str,
+        target: str,
+        files: list[str],
+        related_tests: list[str],
+        warnings: list[str],
+    ) -> str:
+        lines = [
+            "# Chronicle Prepare",
+            "",
+            f"Run ID: {run_id}",
+            f"Repo: {self.config.repo_path}",
+            f"Task: {task}",
+            "",
+            "## Instructions for the Coding Agent",
+            "Use this as basic repo context. Chronicle did not index Python symbols for this repository.",
+            f"Target agent: {target}",
+            "",
+            "## Selected Files",
+        ]
+        lines.extend([f"- {file_path}" for file_path in files[:12]] or ["- none"])
+        lines.extend(["", "## Related Tests"])
+        lines.extend([f"- {file_path}" for file_path in related_tests] or ["- none found"])
+        lines.extend(["", "## Warnings"])
+        lines.extend([f"- {warning}" for warning in warnings])
+        return "\n".join(lines).strip() + "\n"
+
     def _compact_review(self, review: dict[str, Any]) -> dict[str, Any]:
         return {
             "review_id": review.get("review_id"),
@@ -1277,9 +1605,13 @@ class Chronicle:
         for file_path in changed_files:
             for imported in snapshot.dependency_graph.get(file_path, []):
                 maybe_file = imported.replace(".", "/") + ".py"
-                if maybe_file not in changed_set and maybe_file not in related:
+                if (
+                    maybe_file not in changed_set
+                    and maybe_file not in related
+                    and (self.config.repo_path / maybe_file).exists()
+                ):
                     related.append(maybe_file)
-        return related[:8]
+        return [file_path for file_path in related if self._is_repo_review_target(file_path)][:8]
 
     def _review_warnings(
         self,
@@ -1357,6 +1689,14 @@ class Chronicle:
         context: ContextPack,
         risk_level: str,
     ) -> str:
+        ranked_tests = self._rank_review_tests(related_tests=related_tests, changed_files=changed_files, changed_symbols=changed_symbols)
+        findings = self._review_findings(
+            risk_level=risk_level,
+            changed_files=changed_files,
+            changed_symbols=changed_symbols,
+            related_tests=ranked_tests,
+            warnings=warnings,
+        )
         lines = [
             "# Chronicle Review",
             "",
@@ -1368,18 +1708,24 @@ class Chronicle:
             f"- Risk level: {risk_level}",
             f"- Changed files: {len(changed_files)}",
             f"- Impacted symbols: {len(changed_symbols)}",
-            "## Changed Files",
+            "",
+            "## Findings",
         ]
+        lines.extend(findings)
+        lines.extend([
+            "",
+            "## Changed Files",
+        ])
         lines.extend([f"- {file_path}" for file_path in changed_files] or ["- none detected"])
         lines.extend(["", "## Changed Symbols"])
         lines.extend([f"- {symbol}" for symbol in changed_symbols[:12]] or ["- none detected"])
         lines.extend(["", "## Related Files To Inspect"])
         lines.extend([f"- {file_path}" for file_path in related_files] or ["- none found"])
-        lines.extend(["", "## Related Tests"])
-        lines.extend([f"- {file_path}" for file_path in related_tests] or ["- none found"])
+        lines.extend(["", "## Suggested Validation"])
+        lines.extend([f"- {self._test_command_for_file(file_path)}" for file_path in ranked_tests] or ["- No directly related test command found."])
         lines.extend(["", "## Warnings"])
         lines.extend([f"- {warning}" for warning in warnings] or ["- none"])
-        lines.extend(["", "## Grounded Context", context.compressed_context.strip()])
+        lines.extend(["", "## Inspect Context", self._review_context_excerpt(context.compressed_context)])
         return "\n".join(lines).strip() + "\n"
 
     def _render_handoff_packet(
@@ -1472,6 +1818,337 @@ class Chronicle:
         lines.extend([f"- {warning}" for warning in warnings] or ["- none"])
         lines.extend(["", "## Reviewer Notes", "- Inspect changed files and run the suggested tests before merging."])
         return "\n".join(lines).strip() + "\n"
+
+    def _basic_review(self, *, run_id: str, query: str) -> dict[str, Any]:
+        changed_files = self._git_changed_files(base="HEAD")
+        related_tests = [file_path for file_path in self._basic_repo_files() if self._looks_like_test_file(file_path)][:8]
+        warnings = ["No Python symbols were indexed; Chronicle used basic git diff review."]
+        warnings.extend(self._risk_warnings_for_files(changed_files))
+        risk_level = self._risk_level(changed_files=changed_files, warnings=warnings)
+        run_dir = self.config.index_dir / "runs" / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        review_md_path = run_dir / "review.md"
+        review_json_path = run_dir / "review.json"
+        lines = [
+            "# Chronicle Review",
+            "",
+            f"Run ID: {run_id}",
+            f"Repo: {self.config.repo_path}",
+            f"Task: {query}",
+            "",
+            "## Summary",
+            f"- Risk level: {risk_level}",
+            f"- Changed files: {len(changed_files)}",
+            "- Impacted symbols: 0",
+            "",
+            "## Changed Files",
+        ]
+        lines.extend([f"- {file_path}" for file_path in changed_files] or ["- none detected"])
+        lines.extend(["", "## Changed Symbols", "- none detected"])
+        lines.extend(["", "## Related Files To Inspect"])
+        lines.extend([f"- {file_path}" for file_path in changed_files] or ["- none found"])
+        lines.extend(["", "## Related Tests"])
+        lines.extend([f"- {file_path}" for file_path in related_tests] or ["- none found"])
+        lines.extend(["", "## Warnings"])
+        lines.extend([f"- {warning}" for warning in warnings] or ["- none"])
+        review_md = "\n".join(lines).strip() + "\n"
+        payload = {
+            "review_id": run_id,
+            "run_id": run_id,
+            "command": "review",
+            "query": query,
+            "repo_path": str(self.config.repo_path),
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "risk_level": risk_level,
+            "changed_files": changed_files,
+            "changed_symbols": [],
+            "related_files": changed_files,
+            "related_tests": related_tests,
+            "warnings": warnings,
+            "review_packet": review_md,
+            "output_files": {
+                "review_md": str(review_md_path),
+                "review_json": str(review_json_path),
+            },
+        }
+        review_md_path.write_text(review_md, encoding="utf-8")
+        review_json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        return payload
+
+    def _review_findings(
+        self,
+        *,
+        risk_level: str,
+        changed_files: list[str],
+        changed_symbols: list[str],
+        related_tests: list[str],
+        warnings: list[str],
+    ) -> list[str]:
+        if not changed_files:
+            return ["No changed files detected."]
+        blocking = [warning for warning in warnings if "No related tests" in warning or "No prior prepare" in warning]
+        if blocking:
+            verdict = "No blocking issue proven, but validation evidence is incomplete."
+        else:
+            verdict = "No blocking issues found."
+        lines = [verdict, ""]
+        lines.append(
+            f"The change touches {len(changed_files)} file(s) and {len(changed_symbols)} indexed symbol(s). "
+            f"Chronicle classifies the review risk as {risk_level}."
+        )
+        if related_tests:
+            lines.append("Direct or nearby validation targets were found and should be run before merge.")
+        else:
+            lines.append("Chronicle did not find a direct test target; add or run focused validation before merge.")
+        if any("outside the latest prepared packet" in warning for warning in warnings):
+            lines.append("Assumption: files outside the prepared packet were intentionally inspected or changed after preparation.")
+        else:
+            lines.append("Assumption: the prepared context still matches the reviewed change scope.")
+        return lines
+
+    def _rank_review_tests(
+        self,
+        *,
+        related_tests: list[str],
+        changed_files: list[str],
+        changed_symbols: list[str],
+    ) -> list[str]:
+        changed_stems = {Path(file_path).stem.replace("test_", "") for file_path in changed_files}
+        symbol_terms = {symbol.split(".")[-1].lower() for symbol in changed_symbols}
+        ranked: list[tuple[int, str]] = []
+        for test_file in related_tests:
+            lowered = test_file.lower()
+            stem = Path(test_file).stem.replace("test_", "")
+            score = 0
+            if stem in changed_stems:
+                score += 10
+            if any(changed_stem and changed_stem in lowered for changed_stem in changed_stems):
+                score += 6
+            if any(term and term in lowered for term in symbol_terms):
+                score += 4
+            if "script" in lowered or "manual" in lowered or "smoke" in lowered:
+                score -= 5
+            ranked.append((score, test_file))
+        return [file_path for _, file_path in sorted(ranked, key=lambda item: (-item[0], item[1]))[:6]]
+
+    def _test_command_for_file(self, file_path: str) -> str:
+        if file_path.endswith(".py"):
+            return f"python -m unittest {file_path[:-3].replace('/', '.')}"
+        return file_path
+
+    def _review_context_excerpt(self, text: str, *, max_lines: int = 80) -> str:
+        lines = [line for line in text.strip().splitlines() if line.strip()]
+        if len(lines) <= max_lines:
+            return "\n".join(lines)
+        return "\n".join(lines[:max_lines] + ["...", "Context truncated for review readability."])
+
+    def _is_repo_review_target(self, file_path: str) -> bool:
+        path = self.config.repo_path / file_path
+        if not path.exists():
+            return False
+        parts = Path(file_path).parts
+        return not any(part in {".git", "chronicle_logs", ".chronicle", "__pycache__"} for part in parts)
+
+    def _build_run_report(
+        self,
+        *,
+        run_state: dict[str, Any],
+        review: dict[str, Any],
+        pr_review: dict[str, Any],
+        base: str,
+    ) -> str:
+        prepare = run_state.get("prepare", {})
+        review_data = review if review.get("changed_files") is not None else run_state.get("review", {})
+        token_stats = prepare.get("token_stats", {})
+        score = self._context_quality_score(run_state=run_state, review=review_data)
+        risk = review_data.get("risk_level") or pr_review.get("risk_level") or "unknown"
+        changed_files = review_data.get("changed_files", [])
+        changed_symbols = review_data.get("changed_symbols", []) or pr_review.get("impacted_symbols", [])
+        suggested_tests = review_data.get("related_tests", []) or pr_review.get("suggested_tests", [])
+        warnings = list(dict.fromkeys((prepare.get("warnings") or []) + (review_data.get("warnings") or []) + (pr_review.get("warnings") or [])))
+        warnings = list(dict.fromkeys(warnings + self._risk_warnings_for_files(changed_files or prepare.get("selected_files", []))))
+        lines = [
+            "# Chronicle Run Report",
+            "",
+            "## Task",
+            str(run_state.get("task")),
+            "",
+            "## Verdict",
+            self._report_verdict(risk=risk, changed_files=changed_files, suggested_tests=suggested_tests, warnings=warnings),
+            "",
+            "## Context Quality Score",
+            f"Score: {score}/100",
+            "",
+            "Why:",
+        ]
+        lines.extend(self._context_quality_reasons(run_state=run_state, review=review_data))
+        lines.extend(
+            [
+                "",
+                "## Token Budget",
+                f"Token budget: {token_stats.get('token_budget') or 'estimated from selected context'}",
+                "",
+                "## Token Savings",
+                f"Estimated raw repo context: {token_stats.get('estimated_raw_tokens', 'unknown')} tokens",
+                f"Chronicle context packet: {token_stats.get('packet_tokens', 'unknown')} tokens",
+                f"Estimated reduction: {token_stats.get('reduction_percent', 'unknown')}%",
+                "",
+                "## Selected Context",
+            ]
+        )
+        lines.extend([f"- {file_path}" for file_path in prepare.get("selected_files", [])] or ["- none"])
+        lines.extend(["", "## Excluded Context"])
+        lines.extend([f"- {item}" for item in prepare.get("excluded_candidates", [])[:12]] or ["- none recorded"])
+        lines.extend(["", "## Why This Context Was Selected"])
+        reasons = prepare.get("selection_reasons", {})
+        if reasons:
+            for file_path, file_reasons in list(reasons.items())[:8]:
+                lines.append(f"- {file_path}: {', '.join(file_reasons[:3])}")
+        else:
+            lines.append("- Chronicle selected the highest-ranked symbols for the task.")
+        lines.extend(
+            [
+                "",
+                "## Agent Prompt Summary",
+                f"Agent prompt saved for target `{run_state.get('target', 'generic')}`.",
+                "",
+                "## Changes Detected",
+            ]
+        )
+        lines.extend([f"- {file_path}" for file_path in changed_files] or ["- none detected"])
+        lines.extend(["", "## Impacted Files and Symbols"])
+        lines.extend([f"- {symbol}" for symbol in changed_symbols[:16]] or ["- none detected"])
+        lines.extend(["", "## Risk Review", f"Risk level: {risk}"])
+        lines.extend(["", "## Suggested Tests"])
+        lines.extend([f"- {test}" for test in suggested_tests] or ["- none found"])
+        lines.extend(["", "## Missing Context / Warnings"])
+        lines.extend([f"- {warning}" for warning in warnings] or ["- none"])
+        lines.extend(
+            [
+                "",
+                "## Next Agent Prompt",
+                "Use the saved report and diff to continue from the reviewed state.",
+                "",
+                "## Saved Artifacts",
+            ]
+        )
+        for name, path in sorted((run_state.get("artifacts") or {}).items()):
+            lines.append(f"- {name}: {path}")
+        lines.append(f"- base: {base}")
+        return "\n".join(lines).strip() + "\n"
+
+    def _report_verdict(self, *, risk: str, changed_files: list[str], suggested_tests: list[str], warnings: list[str]) -> str:
+        if not changed_files:
+            return "Low risk. Chronicle did not detect changed files for this run."
+        if risk == "high":
+            intro = "High risk."
+        elif risk == "medium":
+            intro = "Medium risk."
+        else:
+            intro = "Low risk."
+        test_note = "Related tests were found." if suggested_tests else "No related tests were found."
+        warning_note = f" Chronicle recorded {len(warnings)} warning(s)." if warnings else ""
+        return f"{intro} Chronicle detected {len(changed_files)} changed file(s). {test_note}{warning_note}"
+
+    def _context_quality_score(self, *, run_state: dict[str, Any], review: dict[str, Any]) -> int:
+        prepare = run_state.get("prepare", {})
+        score = 50
+        if prepare.get("selected_files"):
+            score += 12
+        if prepare.get("selected_symbols"):
+            score += 10
+        if prepare.get("related_tests"):
+            score += 10
+        if review.get("related_tests"):
+            score += 8
+        if prepare.get("token_stats", {}).get("reduction_percent", 0) >= 50:
+            score += 8
+        changed = set(review.get("changed_files", []))
+        selected = set(prepare.get("selected_files", []))
+        if changed and selected and changed.issubset(selected):
+            score += 7
+        if prepare.get("warnings"):
+            score -= 8
+        if review.get("warnings"):
+            score -= min(15, len(review.get("warnings", [])) * 5)
+        return max(0, min(100, score))
+
+    def _context_quality_reasons(self, *, run_state: dict[str, Any], review: dict[str, Any]) -> list[str]:
+        prepare = run_state.get("prepare", {})
+        reasons: list[str] = []
+        if prepare.get("selected_files"):
+            reasons.append("- Included task-specific files")
+        if prepare.get("selected_symbols"):
+            reasons.append("- Included direct symbol matches")
+        if prepare.get("related_tests") or review.get("related_tests"):
+            reasons.append("- Found related tests")
+        if prepare.get("token_stats", {}).get("reduction_percent") is not None:
+            reasons.append("- Estimated token savings were recorded")
+        if prepare.get("warnings") or review.get("warnings"):
+            reasons.append("- Warning: some context or review coverage may be incomplete")
+        return reasons or ["- Chronicle recorded limited context-quality evidence"]
+
+    def _basic_repo_files(self) -> list[str]:
+        if (self.config.repo_path / ".git").exists():
+            result = subprocess.run(
+                ["git", "ls-files"],
+                cwd=self.config.repo_path,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if result.returncode == 0:
+                files = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+                return [file_path for file_path in files if not self._is_ignored_basic_file(file_path)]
+        files = []
+        for path in sorted(self.config.repo_path.rglob("*")):
+            if path.is_file():
+                rel = str(path.relative_to(self.config.repo_path))
+                if not self._is_ignored_basic_file(rel):
+                    files.append(rel)
+        return files
+
+    def _is_ignored_basic_file(self, file_path: str) -> bool:
+        parts = Path(file_path).parts
+        return any(part in {".git", "chronicle_logs", ".chronicle", "dist", "build", "__pycache__"} for part in parts)
+
+    def _looks_like_test_file(self, file_path: str) -> bool:
+        lowered = file_path.lower()
+        return "test" in Path(file_path).name.lower() or "/test" in f"/{lowered}" or "/spec" in f"/{lowered}"
+
+    def _basic_file_reasons(self, file_path: str) -> list[str]:
+        reasons = ["tracked repo file"]
+        risk_labels = self._file_risk_labels(file_path)
+        if risk_labels:
+            reasons.append("risk: " + ", ".join(risk_labels))
+        if self._looks_like_test_file(file_path):
+            reasons.append("related test candidate")
+        return reasons
+
+    def _risk_warnings_for_files(self, files: list[str]) -> list[str]:
+        warnings = []
+        for file_path in files:
+            labels = self._file_risk_labels(file_path)
+            if labels:
+                warnings.append(f"{file_path} is {', '.join(labels)}.")
+        return warnings
+
+    def _file_risk_labels(self, file_path: str) -> list[str]:
+        lowered = file_path.lower()
+        labels = []
+        if Path(lowered).name in {"package.json", "pnpm-lock.yaml", "yarn.lock", "package-lock.json"}:
+            labels.append("dependency-sensitive")
+        if Path(lowered).name in {"dockerfile", "docker-compose.yml"} or lowered.startswith(".github/workflows/"):
+            labels.append("deployment-sensitive")
+        if ".env" in lowered or lowered.endswith((".yaml", ".yml")):
+            labels.append("config-sensitive")
+        if any(part in lowered for part in ("auth", "security", "login", "session", "token", "permissions")):
+            labels.append("auth-sensitive")
+        if any(part in lowered for part in ("payment", "billing")):
+            labels.append("billing-sensitive")
+        if "migration" in lowered or lowered.startswith("terraform/") or lowered.startswith("infra/"):
+            labels.append("infra-sensitive")
+        return list(dict.fromkeys(labels))
 
     def _risk_level(self, *, changed_files: list[str], warnings: list[str]) -> str:
         if not changed_files:
@@ -1639,6 +2316,54 @@ class Chronicle:
             json.dumps({"id": artifact_id, "json": str(json_path)}, indent=2),
             encoding="utf-8",
         )
+
+    def _write_active_run(self, *, run_id: str, run_json_path: Path) -> None:
+        latest_path = self.config.index_dir / "runs" / "active.json"
+        latest_path.parent.mkdir(parents=True, exist_ok=True)
+        latest_path.write_text(json.dumps({"run_id": run_id, "run_json": str(run_json_path)}, indent=2), encoding="utf-8")
+
+    def _load_run_state(self, *, run_id: str | None = None, latest: bool = False) -> dict[str, Any]:
+        runs_dir = self.config.index_dir / "runs"
+        if run_id:
+            run_json_path = runs_dir / run_id / "run.json"
+        else:
+            pointer_path = runs_dir / "active.json"
+            if not pointer_path.exists() and latest:
+                pointer_path = runs_dir / "latest.json"
+            if not pointer_path.exists():
+                raise ValueError("Chronicle has no active run. Run `chronicle run \"<task>\" --manual` first.")
+            pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+            if pointer.get("run_json"):
+                run_json_path = Path(pointer["run_json"])
+            else:
+                run_json_path = runs_dir / pointer["run_id"] / "run.json"
+        if not run_json_path.exists():
+            if run_id or not latest:
+                raise ValueError(f"Chronicle could not find run `{run_id or 'latest'}`.")
+            prepare = self.replay(run_id=None, latest=True, view="full")
+            run_json_path = runs_dir / prepare["run_id"] / "run.json"
+            run_state = {
+                "run_id": prepare["run_id"],
+                "status": "prepared",
+                "task": prepare.get("task"),
+                "repo_path": str(self.config.repo_path),
+                "target": prepare.get("target"),
+                "timeline": [{"event": "Context prepared", "artifact": "prepare.md"}],
+                "artifacts": {**prepare.get("output_files", {}), "run_json": str(run_json_path)},
+                "prepare": {
+                    "readiness": prepare.get("readiness"),
+                    "selected_files": prepare.get("selected_files", []),
+                    "selected_symbols": prepare.get("selected_symbols", []),
+                    "related_tests": prepare.get("related_tests", []),
+                    "warnings": prepare.get("missing_context_warnings", []),
+                    "token_stats": prepare.get("token_stats", {}),
+                    "selection_reasons": prepare.get("selection_reasons", {}),
+                    "excluded_candidates": prepare.get("excluded_candidates", []),
+                },
+            }
+            run_json_path.write_text(json.dumps(run_state, indent=2), encoding="utf-8")
+            return run_state
+        return json.loads(run_json_path.read_text(encoding="utf-8"))
 
     def _load_artifact_payload(self, pointer: dict[str, Any] | None) -> dict[str, Any] | None:
         if not pointer:
@@ -2519,6 +3244,27 @@ class Chronicle:
             if untracked.returncode == 0:
                 files.extend(line.strip() for line in untracked.stdout.splitlines() if line.strip().endswith(".py"))
         return list(dict.fromkeys(files))
+
+    def _git_diff_patch(self, *, base: str) -> str:
+        if not (self.config.repo_path / ".git").exists():
+            return ""
+        result = subprocess.run(
+            ["git", "diff", "HEAD"],
+            cwd=self.config.repo_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout
+        result = subprocess.run(
+            ["git", "diff", base],
+            cwd=self.config.repo_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return result.stdout if result.returncode == 0 else ""
 
     def _git_changed_files(self, *, base: str) -> list[str]:
         result = subprocess.run(

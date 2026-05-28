@@ -118,6 +118,112 @@ class ReasoningTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 chronicle.pr_review(base="main")
 
+    def test_review_artifact_filters_import_noise_and_adds_findings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init", "-b", "main"], cwd=root, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=root, check=True)
+            subprocess.run(["git", "config", "user.name", "Chronicle Test"], cwd=root, check=True)
+            (root / "service.py").write_text(
+                "from urllib.parse import urlparse\n\n"
+                "def normalize_url(value):\n"
+                "    return urlparse(value).netloc\n",
+                encoding="utf-8",
+            )
+            (root / "test_service.py").write_text(
+                "from service import normalize_url\n\n"
+                "def test_normalize_url():\n"
+                "    assert normalize_url('https://example.com/a') == 'example.com'\n",
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "add", "."], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-m", "initial"], cwd=root, check=True, capture_output=True)
+
+            (root / "service.py").write_text(
+                "from urllib.parse import urlparse\n\n"
+                "def normalize_url(value):\n"
+                "    parsed = urlparse(value)\n"
+                "    return parsed.netloc.lower()\n",
+                encoding="utf-8",
+            )
+
+            review = Chronicle(repo_path=root).review()
+            review_text = Path(review["saved"]["review_md"]).read_text(encoding="utf-8")
+
+            self.assertIn("## Findings", review_text)
+            self.assertIn("## Suggested Validation", review_text)
+            self.assertNotIn("urllib/parse", review_text)
+            self.assertNotIn("__future__/annotations.py", review_text)
+
+    def test_run_finish_report_and_replay_workflow(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init", "-b", "main"], cwd=root, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=root, check=True)
+            subprocess.run(["git", "config", "user.name", "Chronicle Test"], cwd=root, check=True)
+            (root / "auth.py").write_text("def refresh_token(client):\n    return client.refresh()\n", encoding="utf-8")
+            (root / "test_auth.py").write_text("from auth import refresh_token\n", encoding="utf-8")
+            subprocess.run(["git", "add", "."], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-m", "initial"], cwd=root, check=True, capture_output=True)
+
+            chronicle = Chronicle(repo_path=root)
+            run = chronicle.run("Fix auth token refresh bug", manual=True)
+            run_id = run["run_id"]
+            run_dir = root / "chronicle_logs" / "runs" / run_id
+
+            self.assertTrue((run_dir / "prepare.md").exists())
+            self.assertTrue((run_dir / "context_packet.md").exists())
+            self.assertTrue((run_dir / "agent_prompt.md").exists())
+            self.assertTrue((run_dir / "run.json").exists())
+
+            (root / "auth.py").write_text(
+                "def refresh_token(client):\n"
+                "    token = client.refresh()\n"
+                "    return token\n",
+                encoding="utf-8",
+            )
+
+            finished = chronicle.finish(run_id=run_id, base="main")
+            self.assertEqual(finished["status"], "finished")
+            self.assertTrue((run_dir / "diff.patch").exists())
+            self.assertTrue((run_dir / "review.md").exists())
+            self.assertTrue((run_dir / "pr-review.md").exists())
+            self.assertTrue((run_dir / "report.md").exists())
+
+            report = chronicle.report(run_id=run_id)
+            self.assertIn("# Chronicle Run Report", report["report"])
+            self.assertIn("## Context Quality Score", report["report"])
+            self.assertIn("## Token Savings", report["report"])
+            replay = chronicle.replay(run_id=run_id)
+            self.assertEqual(replay["status"], "finished")
+            self.assertTrue(any(item["artifact"] == "report.md" for item in replay["timeline"]))
+
+    def test_run_handles_non_python_repo_and_reports_risk_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workflows = root / ".github" / "workflows"
+            workflows.mkdir(parents=True)
+            subprocess.run(["git", "init", "-b", "main"], cwd=root, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=root, check=True)
+            subprocess.run(["git", "config", "user.name", "Chronicle Test"], cwd=root, check=True)
+            (root / "package.json").write_text('{"scripts":{"test":"echo ok"}}\n', encoding="utf-8")
+            (root / "Dockerfile").write_text("FROM node:20\n", encoding="utf-8")
+            (workflows / "ci.yml").write_text("name: ci\n", encoding="utf-8")
+            subprocess.run(["git", "add", "."], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-m", "initial"], cwd=root, check=True, capture_output=True)
+
+            chronicle = Chronicle(repo_path=root)
+            run = chronicle.run("Update package setup", manual=True)
+            self.assertEqual(run["status"], "prepared")
+
+            (root / "package.json").write_text('{"scripts":{"test":"echo changed"}}\n', encoding="utf-8")
+            finished = chronicle.finish(run_id=run["run_id"], base="main")
+            report = chronicle.report(run_id=run["run_id"])["report"]
+
+            self.assertEqual(finished["status"], "finished")
+            self.assertIn("dependency-sensitive", report)
+            self.assertIn("## Token Savings", report)
+
     def test_context_prefers_exact_symbol_and_respects_budget(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

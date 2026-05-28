@@ -11,22 +11,26 @@ Chronicle prepares grounded repo context before agents code, reviews changes aft
 ```bash
 pip install chronicle-sdk
 chronicle setup codex
-chronicle prepare "Fix auth token refresh bug"
-chronicle review
-chronicle handoff
+chronicle run "Fix auth token refresh bug"
+# paste the saved agent_prompt.md into Codex, Claude, or Cursor
+chronicle finish
 ```
 
 Chronicle saves artifacts under `chronicle_logs/runs/<run_id>/`:
 
 ```text
 prepare.md
+context_packet.md
+agent_prompt.md
+diff.patch
 review.md
-handoff.md
 pr-review.md
+report.md
 prepare.json
+run.json
 ```
 
-Use `prepare.md` as the primary packet for Codex, Claude, Cursor, or another coding agent.
+Use `agent_prompt.md` as the ready-to-paste prompt for Codex, Claude, Cursor, or another coding agent.
 
 ## Agent Setup
 
@@ -47,18 +51,28 @@ Setup adds Chronicle workflow instructions and attempts MCP registration:
 
 If Codex or Claude is not installed, setup still updates the workflow file and prints the manual MCP command. Use `--no-mcp` for instruction files only, or `--mcp-only` to skip instruction files and only configure MCP.
 
-## Daily Loop
+## Two-Step Run Loop
+
+```bash
+chronicle run "Fix auth token refresh bug"
+# agent edits code
+chronicle finish --base main
+```
+
+- `run` prepares the smallest useful context, writes `context_packet.md`, and creates `agent_prompt.md`.
+- `finish` captures `diff.patch`, runs review and PR review logic, and writes `report.md`.
+- `finish` prints the report path; use `chronicle report --latest` later to print or regenerate it.
+- `replay` shows the run timeline and saved artifacts.
+
+If you run Chronicle from inside Codex, the same CLI flow works. `chronicle setup codex` also tries to register Chronicle MCP so Codex can call Chronicle tools directly, but the two-step CLI flow stays the simplest path.
+
+The lower-level commands still exist when you want each step separately:
 
 ```bash
 chronicle prepare "Fix auth token refresh bug"
-# agent edits code
 chronicle review
 chronicle handoff --tests "pytest passed"
 ```
-
-- `prepare` selects relevant files, symbols, tests, warnings, and writes `prepare.md`.
-- `review` inspects changed files, impacted symbols, related tests, warnings, and writes `review.md`.
-- `handoff` summarizes the latest prepare/review state and writes `handoff.md`.
 
 ## Local PR Review
 
